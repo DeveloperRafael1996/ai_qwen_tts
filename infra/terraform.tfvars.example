@@ -1,0 +1,5 @@
+# cp terraform.tfvars.example terraform.tfvars  and edit
+allowed_cidr = "203.0.113.10/32" # your public IP: curl ifconfig.me
+repo_url     = "https://github.com/<user>/ai_qwen_tts.git"
+# github_token = "github_pat_..."  # only if the repo is private
+# key_name     = "my-keypair"      # only if you want SSH access
