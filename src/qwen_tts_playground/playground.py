@@ -1,4 +1,10 @@
-"""Gradio web playground for Qwen3-TTS-12Hz-1.7B-VoiceDesign.
+"""Gradio web playground for Qwen3-TTS VoiceDesign + voice cloning.
+
+Two models, two tabs:
+  - Voice Design (Qwen3-TTS-12Hz-1.7B-VoiceDesign): text + natural-language
+    style instruction -> speech.
+  - Voice Clone (Qwen3-TTS-12Hz-0.6B-Base): text + a reference audio
+    (+ reference text) -> speech in the reference speaker's voice.
 
 Run with:
     uv run python -m qwen_tts_playground.playground
@@ -27,7 +33,12 @@ from qwen_tts_playground.tts_service import QwenTTSService, TTSServiceError, bui
 
 logger = logging.getLogger(__name__)
 
-MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+VOICE_DESIGN_MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+VOICE_CLONE_MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-0.6B-Base"
+
+CLONE_MODE_ICL = "In-Context Learning (needs reference text)"
+CLONE_MODE_X_VECTOR = "Speaker Embedding Only (x-vector)"
+CLONE_MODE_CHOICES = [CLONE_MODE_ICL, CLONE_MODE_X_VECTOR]
 
 LANGUAGE_CHOICES = [Language.SPANISH.value, Language.PORTUGUESE.value, Language.ENGLISH.value]
 GENDER_CHOICES = [Gender.FEMALE.value, Gender.MALE.value]
@@ -49,6 +60,7 @@ DEFAULT_SPEED = Speed.NORMAL.value
 
 HISTORY_HEADERS = [
     "Timestamp",
+    "Mode",
     "Language",
     "Accent",
     "Gender",
@@ -94,6 +106,11 @@ def _on_language_change(language: str, preset_guard: int):
         sample_text,
         _char_count_label(sample_text),
     )
+
+
+def _on_clone_language_change(language: str):
+    sample_text = SAMPLE_TEXTS.get(language, "")
+    return sample_text, _char_count_label(sample_text)
 
 
 def _on_banking_preset_change(preset_name: str, language: str):
@@ -159,12 +176,13 @@ def _guarded_rebuild_prompt(
 
 def _format_perf_markdown(
     result,
+    model_name: str,
     language: str,
     accent: str,
     gender: str,
 ) -> str:
     return (
-        f"**Model:** {MODEL_DISPLAY_NAME}\n\n"
+        f"**Model:** {model_name}\n\n"
         f"**Language:** {language}  \n"
         f"**Accent:** {accent}  \n"
         f"**Gender:** {gender}\n\n"
@@ -184,9 +202,12 @@ def _format_gpu_markdown(service: QwenTTSService) -> str:
     )
 
 
-def _history_row(result, language: str, accent: str, gender: str, voice_style: str) -> list:
+def _history_row(
+    result, mode: str, language: str, accent: str, gender: str, voice_style: str
+) -> list:
     return [
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        mode,
         language,
         accent,
         gender,
@@ -198,7 +219,9 @@ def _history_row(result, language: str, accent: str, gender: str, voice_style: s
     ]
 
 
-def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
+def build_ui(
+    service: QwenTTSService, voice_clone_service: QwenTTSService, settings: Settings
+) -> gr.Blocks:
     def generate_audio(
         text: str,
         language: str,
@@ -244,9 +267,11 @@ def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
                 history_rows,
             )
 
-        perf_md = _format_perf_markdown(result, language, accent, gender)
+        perf_md = _format_perf_markdown(
+            result, VOICE_DESIGN_MODEL_DISPLAY_NAME, language, accent, gender
+        )
         gpu_md = _format_gpu_markdown(service)
-        row = _history_row(result, language, accent, gender, "Main")
+        row = _history_row(result, "Voice Design", language, accent, gender, "Main")
         new_rows = [*history_rows, row]
 
         return (
@@ -304,7 +329,7 @@ def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
                     instruct=instruct,
                     output_path=output_path,
                 )
-                rows.append(_history_row(result, language, accent, gender, label))
+                rows.append(_history_row(result, "Voice Design", language, accent, gender, label))
                 outputs.append(str(result.output_path))
             except TTSServiceError as exc:
                 logger.warning("Comparison synthesis (%s) rejected: %s", label, exc)
@@ -315,6 +340,74 @@ def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
 
         return outputs[0], outputs[1], rows, rows
 
+    def generate_voice_clone(
+        text: str,
+        language: str,
+        ref_audio_path: str | None,
+        ref_text: str,
+        clone_mode: str,
+        seed: float | None,
+        temperature: float | None,
+        top_p: float | None,
+        top_k: float | None,
+        history_rows: list,
+    ):
+        x_vector_only_mode = clone_mode == CLONE_MODE_X_VECTOR
+
+        try:
+            if not voice_clone_service.is_loaded:
+                logger.info("Lazily loading voice-clone model (first use this session)...")
+                voice_clone_service.load()
+
+            output_path = build_output_path(settings.output_dir, language, "clone", "voice")
+            result = voice_clone_service.synthesize_voice_clone(
+                text=text,
+                language=language,
+                ref_audio=ref_audio_path or "",
+                ref_text=ref_text,
+                x_vector_only_mode=x_vector_only_mode,
+                output_path=output_path,
+                temperature=float(temperature) if temperature else None,
+                top_p=float(top_p) if top_p else None,
+                top_k=int(top_k) if top_k else None,
+                seed=int(seed) if seed else None,
+            )
+        except TTSServiceError as exc:
+            logger.warning("Voice-clone synthesis rejected: %s", exc)
+            return (
+                None,
+                gr.update(),
+                _format_gpu_markdown(voice_clone_service),
+                f"Error: {exc}",
+                history_rows,
+                history_rows,
+            )
+        except Exception:
+            logger.exception("Unexpected error during voice-clone synthesis")
+            return (
+                None,
+                gr.update(),
+                _format_gpu_markdown(voice_clone_service),
+                "Error: an unexpected error occurred. Check server logs for details.",
+                history_rows,
+                history_rows,
+            )
+
+        voice_style = "X-Vector" if x_vector_only_mode else "In-Context Learning"
+        perf_md = _format_perf_markdown(result, VOICE_CLONE_MODEL_DISPLAY_NAME, language, "-", "-")
+        gpu_md = _format_gpu_markdown(voice_clone_service)
+        row = _history_row(result, "Voice Clone", language, "-", "-", voice_style)
+        new_rows = [*history_rows, row]
+
+        return (
+            str(result.output_path),
+            perf_md,
+            gpu_md,
+            "Audio generated successfully.",
+            new_rows,
+            new_rows,
+        )
+
     with gr.Blocks(title="Qwen3-TTS VoiceDesign Playground") as demo:
         gr.Markdown("# Qwen3-TTS VoiceDesign Playground")
         gr.Markdown(
@@ -324,112 +417,168 @@ def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
         history_state = gr.State([])
         preset_guard_state = gr.State(0)
 
-        with gr.Row():
-            with gr.Column(scale=1):
-                language = gr.Dropdown(LANGUAGE_CHOICES, value=DEFAULT_LANGUAGE, label="Language")
-                accent = gr.Dropdown(
-                    accent_choices(DEFAULT_LANGUAGE),
-                    value=default_accent(DEFAULT_LANGUAGE),
-                    label="Accent",
-                )
-                gender = gr.Radio(GENDER_CHOICES, value=DEFAULT_GENDER, label="Gender")
-                age = gr.Dropdown(AGE_CHOICES, value=DEFAULT_AGE, label="Age")
-                personality = gr.CheckboxGroup(
-                    PERSONALITY_CHOICES, value=DEFAULT_PERSONALITY, label="Personality"
-                )
-                emotion = gr.Dropdown(EMOTION_CHOICES, value=DEFAULT_EMOTION, label="Emotion")
-                speed = gr.Dropdown(SPEED_CHOICES, value=DEFAULT_SPEED, label="Speaking Pace")
+        with gr.Tab("Voice Design"):
+            with gr.Row():
+                with gr.Column(scale=1):
+                    language = gr.Dropdown(
+                        LANGUAGE_CHOICES, value=DEFAULT_LANGUAGE, label="Language"
+                    )
+                    accent = gr.Dropdown(
+                        accent_choices(DEFAULT_LANGUAGE),
+                        value=default_accent(DEFAULT_LANGUAGE),
+                        label="Accent",
+                    )
+                    gender = gr.Radio(GENDER_CHOICES, value=DEFAULT_GENDER, label="Gender")
+                    age = gr.Dropdown(AGE_CHOICES, value=DEFAULT_AGE, label="Age")
+                    personality = gr.CheckboxGroup(
+                        PERSONALITY_CHOICES, value=DEFAULT_PERSONALITY, label="Personality"
+                    )
+                    emotion = gr.Dropdown(EMOTION_CHOICES, value=DEFAULT_EMOTION, label="Emotion")
+                    speed = gr.Dropdown(SPEED_CHOICES, value=DEFAULT_SPEED, label="Speaking Pace")
 
-                gr.Markdown("---")
-                banking_preset = gr.Dropdown(
-                    ["Custom", *BANKING_PRESET_NAMES],
-                    value="Custom",
-                    label="Banking Preset (fills text below)",
-                )
-                text_input = gr.Textbox(
-                    value=SAMPLE_TEXTS[DEFAULT_LANGUAGE],
-                    label="Text to synthesize",
-                    lines=4,
-                )
-                char_count = gr.Markdown(_char_count_label(SAMPLE_TEXTS[DEFAULT_LANGUAGE]))
+                    gr.Markdown("---")
+                    banking_preset = gr.Dropdown(
+                        ["Custom", *BANKING_PRESET_NAMES],
+                        value="Custom",
+                        label="Banking Preset (fills text below)",
+                    )
+                    text_input = gr.Textbox(
+                        value=SAMPLE_TEXTS[DEFAULT_LANGUAGE],
+                        label="Text to synthesize",
+                        lines=4,
+                    )
+                    char_count = gr.Markdown(_char_count_label(SAMPLE_TEXTS[DEFAULT_LANGUAGE]))
 
-                voice_prompt = gr.Textbox(
-                    value=_rebuild_prompt(
-                        DEFAULT_LANGUAGE,
-                        default_accent(DEFAULT_LANGUAGE),
-                        DEFAULT_GENDER,
-                        DEFAULT_AGE,
-                        DEFAULT_PERSONALITY,
-                        DEFAULT_EMOTION,
-                        DEFAULT_SPEED,
-                        "",
-                    ),
-                    label="Voice Design Instruction",
-                    lines=10,
-                )
-                reset_prompt_btn = gr.Button("Reset Voice Prompt")
+                    voice_prompt = gr.Textbox(
+                        value=_rebuild_prompt(
+                            DEFAULT_LANGUAGE,
+                            default_accent(DEFAULT_LANGUAGE),
+                            DEFAULT_GENDER,
+                            DEFAULT_AGE,
+                            DEFAULT_PERSONALITY,
+                            DEFAULT_EMOTION,
+                            DEFAULT_SPEED,
+                            "",
+                        ),
+                        label="Voice Design Instruction",
+                        lines=10,
+                    )
+                    reset_prompt_btn = gr.Button("Reset Voice Prompt")
 
-                custom_instruction = gr.Textbox(
-                    label="Additional Voice Instruction",
-                    placeholder=(
-                        "Make security instructions slightly more serious, but never alarming."
-                    ),
-                    lines=2,
-                )
+                    custom_instruction = gr.Textbox(
+                        label="Additional Voice Instruction",
+                        placeholder=(
+                            "Make security instructions slightly more serious, but never alarming."
+                        ),
+                        lines=2,
+                    )
 
-                voice_preset_dropdown = gr.Dropdown(
-                    ["None", *VOICE_PRESET_NAMES],
-                    value="None",
-                    label="Load Voice Preset (overrides Voice Design Instruction)",
-                )
+                    voice_preset_dropdown = gr.Dropdown(
+                        ["None", *VOICE_PRESET_NAMES],
+                        value="None",
+                        label="Load Voice Preset (overrides Voice Design Instruction)",
+                    )
 
-                with gr.Accordion("Advanced Settings", open=False):
-                    seed = gr.Number(label="Seed (optional)", value=None, precision=0)
-                    temperature = gr.Slider(0.1, 1.5, value=0.9, step=0.05, label="Temperature")
-                    top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="Top P")
-                    top_k = gr.Slider(0, 100, value=50, step=1, label="Top K")
+                    with gr.Accordion("Advanced Settings", open=False):
+                        seed = gr.Number(label="Seed (optional)", value=None, precision=0)
+                        temperature = gr.Slider(0.1, 1.5, value=0.9, step=0.05, label="Temperature")
+                        top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="Top P")
+                        top_k = gr.Slider(0, 100, value=50, step=1, label="Top K")
 
-                generate_btn = gr.Button("Generate Audio", variant="primary")
+                    generate_btn = gr.Button("Generate Audio", variant="primary")
 
-            with gr.Column(scale=1):
-                audio_output = gr.Audio(label="Generated Audio", autoplay=False)
-                status = gr.Markdown("")
-                perf_info = gr.Markdown("")
-                gpu_info = gr.Markdown(_format_gpu_markdown(service))
+                with gr.Column(scale=1):
+                    audio_output = gr.Audio(label="Generated Audio", autoplay=False)
+                    status = gr.Markdown("")
+                    perf_info = gr.Markdown("")
+                    gpu_info = gr.Markdown(_format_gpu_markdown(service))
 
-        gr.Markdown("## Voice Comparison")
-        gr.Markdown("Compare two voice configurations for the same text and language.")
-        with gr.Row():
-            with gr.Column():
-                gr.Markdown("### Voice A")
-                gender_a = gr.Radio(GENDER_CHOICES, value=Gender.FEMALE.value, label="Gender A")
-                accent_a = gr.Dropdown(
-                    accent_choices(DEFAULT_LANGUAGE),
-                    value=default_accent(DEFAULT_LANGUAGE),
-                    label="Accent A",
-                )
-                personality_a = gr.CheckboxGroup(
-                    PERSONALITY_CHOICES, value=[Personality.WARM.value], label="Personality A"
-                )
-                speed_a = gr.Dropdown(SPEED_CHOICES, value=Speed.NORMAL.value, label="Speed A")
-                audio_a = gr.Audio(label="Voice A Output", autoplay=False)
-            with gr.Column():
-                gr.Markdown("### Voice B")
-                gender_b = gr.Radio(GENDER_CHOICES, value=Gender.MALE.value, label="Gender B")
-                accent_b = gr.Dropdown(
-                    accent_choices(DEFAULT_LANGUAGE),
-                    value=default_accent(DEFAULT_LANGUAGE),
-                    label="Accent B",
-                )
-                personality_b = gr.CheckboxGroup(
-                    PERSONALITY_CHOICES, value=[Personality.CALM.value], label="Personality B"
-                )
-                speed_b = gr.Dropdown(
-                    SPEED_CHOICES, value=Speed.SLIGHTLY_SLOW.value, label="Speed B"
-                )
-                audio_b = gr.Audio(label="Voice B Output", autoplay=False)
+            gr.Markdown("## Voice Comparison")
+            gr.Markdown("Compare two voice configurations for the same text and language.")
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### Voice A")
+                    gender_a = gr.Radio(GENDER_CHOICES, value=Gender.FEMALE.value, label="Gender A")
+                    accent_a = gr.Dropdown(
+                        accent_choices(DEFAULT_LANGUAGE),
+                        value=default_accent(DEFAULT_LANGUAGE),
+                        label="Accent A",
+                    )
+                    personality_a = gr.CheckboxGroup(
+                        PERSONALITY_CHOICES, value=[Personality.WARM.value], label="Personality A"
+                    )
+                    speed_a = gr.Dropdown(SPEED_CHOICES, value=Speed.NORMAL.value, label="Speed A")
+                    audio_a = gr.Audio(label="Voice A Output", autoplay=False)
+                with gr.Column():
+                    gr.Markdown("### Voice B")
+                    gender_b = gr.Radio(GENDER_CHOICES, value=Gender.MALE.value, label="Gender B")
+                    accent_b = gr.Dropdown(
+                        accent_choices(DEFAULT_LANGUAGE),
+                        value=default_accent(DEFAULT_LANGUAGE),
+                        label="Accent B",
+                    )
+                    personality_b = gr.CheckboxGroup(
+                        PERSONALITY_CHOICES, value=[Personality.CALM.value], label="Personality B"
+                    )
+                    speed_b = gr.Dropdown(
+                        SPEED_CHOICES, value=Speed.SLIGHTLY_SLOW.value, label="Speed B"
+                    )
+                    audio_b = gr.Audio(label="Voice B Output", autoplay=False)
 
-        compare_btn = gr.Button("Generate Comparison")
+            compare_btn = gr.Button("Generate Comparison")
+
+        with gr.Tab("Voice Clone"):
+            gr.Markdown(
+                "Clone a voice from a short reference audio clip (3+ seconds recommended) "
+                "using the smaller **Qwen3-TTS-12Hz-0.6B-Base** model. This model is loaded "
+                "lazily, on the first click below, to avoid holding two large models in VRAM "
+                "at once."
+            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    clone_language = gr.Dropdown(
+                        LANGUAGE_CHOICES, value=DEFAULT_LANGUAGE, label="Language"
+                    )
+                    clone_text_input = gr.Textbox(
+                        value=SAMPLE_TEXTS[DEFAULT_LANGUAGE],
+                        label="Text to synthesize",
+                        lines=4,
+                    )
+                    clone_char_count = gr.Markdown(
+                        _char_count_label(SAMPLE_TEXTS[DEFAULT_LANGUAGE])
+                    )
+
+                    ref_audio = gr.Audio(
+                        sources=["upload", "microphone"],
+                        type="filepath",
+                        label="Reference Audio",
+                    )
+                    clone_mode = gr.Radio(
+                        CLONE_MODE_CHOICES,
+                        value=CLONE_MODE_ICL,
+                        label="Cloning Mode",
+                    )
+                    ref_text = gr.Textbox(
+                        label="Reference Text (what is said in the reference audio)",
+                        lines=2,
+                        visible=True,
+                    )
+
+                    with gr.Accordion("Advanced Settings", open=False):
+                        clone_seed = gr.Number(label="Seed (optional)", value=None, precision=0)
+                        clone_temperature = gr.Slider(
+                            0.1, 1.5, value=0.9, step=0.05, label="Temperature"
+                        )
+                        clone_top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="Top P")
+                        clone_top_k = gr.Slider(0, 100, value=50, step=1, label="Top K")
+
+                    generate_clone_btn = gr.Button("Generate Cloned Audio", variant="primary")
+
+                with gr.Column(scale=1):
+                    clone_audio_output = gr.Audio(label="Generated Audio", autoplay=False)
+                    clone_status = gr.Markdown("")
+                    clone_perf_info = gr.Markdown("")
+                    clone_gpu_info = gr.Markdown(_format_gpu_markdown(voice_clone_service))
 
         gr.Markdown("## Session History")
         history_table = gr.Dataframe(headers=HISTORY_HEADERS, value=[], wrap=True)
@@ -525,6 +674,46 @@ def build_ui(service: QwenTTSService, settings: Settings) -> gr.Blocks:
             outputs=[audio_a, audio_b, history_state, history_table],
         )
 
+        clone_language.change(
+            fn=_on_clone_language_change,
+            inputs=[clone_language],
+            outputs=[clone_text_input, clone_char_count],
+        )
+
+        clone_text_input.change(
+            fn=_char_count_label, inputs=[clone_text_input], outputs=[clone_char_count]
+        )
+
+        clone_mode.change(
+            fn=lambda mode: gr.update(visible=mode != CLONE_MODE_X_VECTOR),
+            inputs=[clone_mode],
+            outputs=[ref_text],
+        )
+
+        generate_clone_btn.click(
+            fn=generate_voice_clone,
+            inputs=[
+                clone_text_input,
+                clone_language,
+                ref_audio,
+                ref_text,
+                clone_mode,
+                clone_seed,
+                clone_temperature,
+                clone_top_p,
+                clone_top_k,
+                history_state,
+            ],
+            outputs=[
+                clone_audio_output,
+                clone_perf_info,
+                clone_gpu_info,
+                clone_status,
+                history_state,
+                history_table,
+            ],
+        )
+
     return demo
 
 
@@ -535,10 +724,18 @@ def main() -> None:
     )
 
     settings = get_settings()
-    service = QwenTTSService(settings)
+
+    service = QwenTTSService(settings, model_source=settings.resolve_model_source())
     service.load()
 
-    demo = build_ui(service, settings)
+    # The voice-clone (Base) model is loaded lazily on first use of that tab,
+    # so a GPU that can only fit one model at a time (e.g. a 4-6GB laptop
+    # GPU) doesn't fail at startup just because both models are configured.
+    voice_clone_service = QwenTTSService(
+        settings, model_source=settings.resolve_voice_clone_model_source()
+    )
+
+    demo = build_ui(service, voice_clone_service, settings)
     demo.launch(server_name=settings.playground_host, server_port=settings.playground_port)
 
 

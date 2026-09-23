@@ -1,9 +1,10 @@
-"""Encapsulates loading and running the Qwen3-TTS VoiceDesign model.
+"""Encapsulates loading and running a Qwen3-TTS model (VoiceDesign or Base).
 
 The model is loaded exactly once (see `QwenTTSService.load`) and every
-subsequent `synthesize()` call reuses the already-loaded weights. GPU
-inference is protected by a lock so that concurrent UI clicks cannot launch
-overlapping `generate()` calls on the same model instance.
+subsequent `synthesize()`/`synthesize_voice_clone()` call reuses the
+already-loaded weights. GPU inference is protected by a lock so that
+concurrent UI clicks cannot launch overlapping `generate()` calls on the same
+model instance.
 """
 
 from __future__ import annotations
@@ -54,6 +55,10 @@ class CudaOutOfMemoryError(TTSServiceError):
     """Raised when CUDA runs out of memory during generation."""
 
 
+class InvalidReferenceAudioError(TTSServiceError):
+    """Raised when voice-clone reference audio/text is missing or invalid."""
+
+
 SUPPORTED_LANGUAGES = {"spanish", "portuguese", "english"}
 
 _FILENAME_UNSAFE_RE = re.compile(r"[^a-z0-9_]+")
@@ -96,6 +101,27 @@ def _flash_attention_available() -> bool:
     return find_spec("flash_attn") is not None
 
 
+def _write_result(
+    wavs: list, sample_rate: int, generation_time: float, output_path: Path
+) -> TTSResult:
+    if not wavs:
+        raise GenerationError("Model returned no audio.")
+
+    wav = wavs[0]
+    audio_duration = len(wav) / float(sample_rate)
+    real_time_factor = generation_time / audio_duration if audio_duration > 0 else float("inf")
+
+    sf.write(str(output_path), wav, sample_rate)
+
+    return TTSResult(
+        output_path=output_path,
+        sample_rate=sample_rate,
+        generation_time_seconds=generation_time,
+        audio_duration_seconds=audio_duration,
+        real_time_factor=real_time_factor,
+    )
+
+
 def _gpu_summary() -> str:
     if not torch.cuda.is_available():
         return "No CUDA GPU detected; running on CPU."
@@ -108,10 +134,18 @@ def _gpu_summary() -> str:
 
 
 class QwenTTSService:
-    """Loads Qwen3-TTS VoiceDesign once and serves thread-safe synthesis calls."""
+    """Loads one Qwen3-TTS model once and serves thread-safe synthesis calls.
 
-    def __init__(self, settings: Settings) -> None:
+    Works with either a VoiceDesign checkpoint (use `synthesize()`) or a Base
+    voice-cloning checkpoint (use `synthesize_voice_clone()`), depending on
+    which `model_source` was loaded. Pass an explicit `model_source` to pick
+    which model this instance loads; if omitted, it falls back to
+    `settings.resolve_model_source()` (the VoiceDesign model).
+    """
+
+    def __init__(self, settings: Settings, model_source: str | None = None) -> None:
         self._settings = settings
+        self._model_source_override = model_source
         self._lock = threading.Lock()
         self._model = None
         self._device: str = "cpu"
@@ -127,13 +161,13 @@ class QwenTTSService:
         return self._device
 
     def load(self) -> None:
-        """Load the VoiceDesign model once. Safe to call multiple times (no-op after first)."""
+        """Load the model once. Safe to call multiple times (no-op after first)."""
         if self._model is not None:
             return
 
         from qwen_tts import Qwen3TTSModel
 
-        model_source = self._settings.resolve_model_source()
+        model_source = self._model_source_override or self._settings.resolve_model_source()
         self._model_source = model_source
 
         local_path = Path(model_source)
@@ -159,7 +193,7 @@ class QwenTTSService:
         if attn_implementation:
             load_kwargs["attn_implementation"] = attn_implementation
 
-        logger.info("Loading Qwen3-TTS VoiceDesign model from %s", model_source)
+        logger.info("Loading Qwen3-TTS model from %s", model_source)
         try:
             try:
                 self._model = Qwen3TTSModel.from_pretrained(model_source, **load_kwargs)
@@ -269,19 +303,80 @@ class QwenTTSService:
 
             generation_time = time.perf_counter() - start
 
-        if not wavs:
-            raise GenerationError("Model returned no audio.")
+        return _write_result(wavs, sample_rate, generation_time, output_path)
 
-        wav = wavs[0]
-        audio_duration = len(wav) / float(sample_rate)
-        real_time_factor = generation_time / audio_duration if audio_duration > 0 else float("inf")
+    def synthesize_voice_clone(
+        self,
+        text: str,
+        language: str,
+        ref_audio: str,
+        ref_text: str | None = None,
+        x_vector_only_mode: bool = False,
+        output_path: Path | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+    ) -> TTSResult:
+        """Clone a voice from `ref_audio` (+ `ref_text` in ICL mode) and synthesize `text`."""
+        if not text or not text.strip():
+            raise InvalidTextError("Text to synthesize must not be empty.")
 
-        sf.write(str(output_path), wav, sample_rate)
+        if language.lower() not in SUPPORTED_LANGUAGES:
+            raise InvalidLanguageError(
+                f"Unsupported language '{language}'. Supported: Spanish, Portuguese, English."
+            )
 
-        return TTSResult(
-            output_path=output_path,
-            sample_rate=sample_rate,
-            generation_time_seconds=generation_time,
-            audio_duration_seconds=audio_duration,
-            real_time_factor=real_time_factor,
-        )
+        if not ref_audio:
+            raise InvalidReferenceAudioError("Reference audio is required for voice cloning.")
+
+        if not x_vector_only_mode and not (ref_text and ref_text.strip()):
+            raise InvalidReferenceAudioError(
+                "Reference text is required in In-Context Learning mode. Either provide the "
+                "text spoken in the reference audio, or enable 'Speaker embedding only'."
+            )
+
+        if self._model is None:
+            raise ModelNotFoundError("Model is not loaded. Call load() before synthesize.")
+
+        if output_path is None:
+            output_path = build_output_path(self._settings.output_dir, language, "clone", "voice")
+
+        with self._lock:
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+            gen_kwargs: dict = {}
+            if temperature is not None:
+                gen_kwargs["temperature"] = temperature
+            if top_p is not None:
+                gen_kwargs["top_p"] = top_p
+            if top_k is not None:
+                gen_kwargs["top_k"] = top_k
+
+            start = time.perf_counter()
+            try:
+                wavs, sample_rate = self._model.generate_voice_clone(
+                    text=text,
+                    language=language,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
+                    x_vector_only_mode=x_vector_only_mode,
+                    **gen_kwargs,
+                )
+            except torch.cuda.OutOfMemoryError as exc:
+                torch.cuda.empty_cache()
+                logger.error("CUDA OOM during voice-clone generation:\n%s", traceback.format_exc())
+                raise CudaOutOfMemoryError(
+                    "CUDA ran out of memory during generation. Try shorter text, "
+                    "reduce max_new_tokens, or free VRAM from other processes."
+                ) from exc
+            except Exception as exc:
+                logger.error("Voice-clone generation failed:\n%s", traceback.format_exc())
+                raise GenerationError(f"Generation failed: {exc}") from exc
+
+            generation_time = time.perf_counter() - start
+
+        return _write_result(wavs, sample_rate, generation_time, output_path)

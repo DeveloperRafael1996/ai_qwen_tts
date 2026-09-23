@@ -1,14 +1,24 @@
 # Qwen3-TTS VoiceDesign Playground
 
 A local, professional web playground to experiment with **text-to-speech**
-using [`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign):
-Spanish, Portuguese and English, with configurable accent, gender, age,
-personality, emotion, speed, style and free-text instructions — evaluated
-against a banking-assistant use case.
+in Spanish, Portuguese and English, with two tabs backed by two different
+Qwen3-TTS models:
+
+- **Voice Design** — [`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign):
+  configurable accent, gender, age, personality, emotion, speed, style and
+  free-text instructions, evaluated against a banking-assistant use case.
+- **Voice Clone** — [`Qwen/Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base):
+  clone a voice from a short reference audio clip (+ optional reference
+  text) instead of describing it with words.
 
 ```text
+Voice Design tab:
 Language → Accent → Gender → Age → Personality → Emotion → Speed
-    → VoiceDesign Prompt → Text → Generate → Qwen3-TTS → Audio Player
+    → VoiceDesign Prompt → Text → Generate → Qwen3-TTS-1.7B-VoiceDesign → Audio Player
+
+Voice Clone tab:
+Language → Reference Audio (+ Reference Text) → Text → Generate
+    → Qwen3-TTS-0.6B-Base → Audio Player
 ```
 
 ---
@@ -53,30 +63,46 @@ declared in `pyproject.toml` (`qwen-tts`, `gradio`, `soundfile`, `pydantic`,
 `pydantic-settings`, `huggingface-hub`, plus dev tools `pytest`,
 `pytest-mock`, `ruff`).
 
-## 4. Getting the model
+## 4. Getting the models
 
-### Option A — download it locally (recommended for repeated use)
+This app uses two separate Qwen3-TTS checkpoints, one per tab.
+
+### Option A — download them locally (recommended for repeated use)
 
 ```bash
 uv run hf download \
   Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign \
   --local-dir ./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+
+uv run hf download \
+  Qwen/Qwen3-TTS-12Hz-0.6B-Base \
+  --local-dir ./models/Qwen3-TTS-12Hz-0.6B-Base
 ```
 
-Then point the app at it via `.env`:
+Then point the app at them via `.env`:
 
 ```env
 QWEN_TTS_MODEL_PATH=./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+QWEN_TTS_VOICE_CLONE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-Base
 ```
 
 ### Option B — stream from the Hugging Face Hub
 
-If `QWEN_TTS_MODEL_PATH` does not exist (or is empty), the app falls back to
-the Hub repo id `Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` directly, letting
-`from_pretrained` download and cache it under `~/.cache/huggingface`.
+If either path does not exist (or is empty), the app falls back to the
+matching Hub repo id (`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` or
+`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) directly, letting `from_pretrained` download
+and cache it under `~/.cache/huggingface`.
 
-In both cases **the model is loaded exactly once**, at process startup — never
-per-request.
+### Loading behavior
+
+- The **Voice Design** model is loaded exactly once, at process startup —
+  never per-request — as the primary spec requires.
+- The **Voice Clone** model is loaded **lazily**, on the first click of
+  "Generate Cloned Audio" in that tab (then cached for the rest of the
+  session, also never reloaded per-request). This is a deliberate choice:
+  many GPUs (e.g. a 4-6GB laptop GPU) cannot hold both models in VRAM at
+  once, so eagerly loading both at startup would make the whole app fail to
+  launch on modest hardware. See §12 for VRAM numbers observed in practice.
 
 ## 5. Configuration
 
@@ -84,6 +110,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 
 ```env
 QWEN_TTS_MODEL_PATH=./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+QWEN_TTS_VOICE_CLONE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-Base
 PLAYGROUND_HOST=127.0.0.1
 PLAYGROUND_PORT=7860
 OUTPUT_DIR=outputs
@@ -136,9 +163,28 @@ to the model as `language=` in `generate_voice_design(...)`.
 7. Write or pick a **Banking Preset** for the **Text to synthesize**.
 8. Click **Generate Audio**.
 
-## 10. GPU usage & performance metrics
+## 10. Voice Clone tab
 
-- The model loads once as `cuda:0` + `torch.bfloat16` when a CUDA GPU is
+Unlike Voice Design, cloning does not use `instruct` text — it uses a
+reference recording of a real voice:
+
+1. Pick a **Language**.
+2. Upload or record a **Reference Audio** clip (3+ seconds recommended).
+3. Choose a **Cloning Mode**:
+   - **In-Context Learning** (default): the model continues from the
+     reference speech + reference text, which must match what is actually
+     said in the clip. Generally higher quality.
+   - **Speaker Embedding Only (x-vector)**: only the speaker's voice
+     characteristics are extracted; no reference text is needed, but
+     quality/naturalness is usually a bit lower.
+4. Write the **Text to synthesize** and click **Generate Cloned Audio**.
+
+This tab's model (`Qwen3-TTS-12Hz-0.6B-Base`) loads on the first click, not
+at startup — see §4.
+
+## 12. GPU usage & performance metrics
+
+- Each model loads once as `cuda:0` + `torch.bfloat16` when a CUDA GPU is
   available (`float32` on CPU).
 - `attn_implementation="flash_attention_2"` is used automatically **only**
   if the `flash-attn` package is importable; otherwise the default
@@ -152,28 +198,44 @@ to the model as `language=` in `generate_voice_design(...)`.
   - **Sample rate**, **GPU name**, **VRAM allocated/reserved**
     (`torch.cuda.memory_allocated()` / `memory_reserved()`)
 
-## 11. Thread safety
+Numbers observed on a 4GB laptop GPU (NVIDIA RTX 500 Ada, 3.65 GiB usable):
+the 1.7B VoiceDesign model does **not** fit (`CudaOutOfMemoryError` while
+loading), while the 0.6B Base voice-clone model **does** fit comfortably
+(~2.1 GiB allocated, 1.4 GiB still free) and produced audio with RTF ≈ 1.3.
+Your mileage will vary with driver/CUDA version and other processes holding
+VRAM — see §13 for the VoiceDesign fallback.
+
+## 13. Thread safety
 
 GPU inference is serialized behind a lock in `QwenTTSService`. Concurrent
 clicks in the UI queue instead of racing on the same model instance, which
 avoids state corruption and reduces OOM risk from overlapping generations.
+Each tab's model has its own `QwenTTSService` instance/lock, so a Voice
+Design generation and a Voice Clone generation could in principle run
+concurrently — but on a single GPU with limited VRAM, running both tabs at
+once is likely to OOM; prefer using one tab at a time on constrained
+hardware.
 
-## 12. Troubleshooting CUDA OOM
+## 14. Troubleshooting CUDA OOM
 
-The 1.7B model in `bfloat16` needs a few GB of VRAM plus activation memory
-that scales with text length. If you hit `CudaOutOfMemoryError`:
+Both models need a few GB of VRAM (more for the 1.7B VoiceDesign model)
+plus activation memory that scales with text length. If you hit
+`CudaOutOfMemoryError`, whether while loading a model or during generation:
 
 - Shorten the input text or split it into shorter segments.
 - Close other GPU-using processes (check with `nvidia-smi`).
 - Lower `max_new_tokens` via **Advanced Settings** if exposed, or reduce
   `Top K`/`Top P` sampling breadth.
+- Try the smaller Voice Clone (0.6B) model instead of VoiceDesign (1.7B) if
+  your GPU can't fit the larger one — see the VRAM numbers in §12.
 - If you are on a GPU with very limited VRAM (e.g. 4-6 GB laptop GPUs), fall
   back to CPU by unsetting CUDA (`CUDA_VISIBLE_DEVICES=""`) — generation will
   be much slower but still functional for evaluation purposes.
-- The app calls `torch.cuda.empty_cache()` after an OOM to help recovery for
-  the next attempt without restarting the process.
+- The app calls `torch.cuda.empty_cache()` after an OOM (whether at load
+  time or generation time) to help recovery for the next attempt without
+  restarting the process.
 
-## 13. Project structure
+## 15. Project structure
 
 ```text
 qwen-tts-playground/
@@ -190,33 +252,42 @@ qwen-tts-playground/
 │   └── test_tts_service.py
 └── src/qwen_tts_playground/
     ├── __init__.py
-    ├── config.py                # pydantic-settings env config
+    ├── config.py                # pydantic-settings env config (2 model paths)
     ├── models.py                 # enums + pydantic result models
     ├── profiles.py                # accents, ages, speeds, presets (data)
     ├── prompt_builder.py          # VoicePromptBuilder -> single instruct
-    ├── tts_service.py             # QwenTTSService: load once, synthesize
-    └── playground.py              # Gradio UI (entry point)
+    ├── tts_service.py             # QwenTTSService: load once, synthesize (+ clone)
+    └── playground.py              # Gradio UI: Voice Design tab + Voice Clone tab
 ```
 
 Architecture:
 
 ```text
-Playground (Gradio UI)
+Playground (Gradio UI, 2 tabs)
     │
-    ▼
-VoicePromptBuilder  (language, accent, gender, age, personality, emotion, speed, custom → instruct)
+    ├── Voice Design tab
+    │       │
+    │       ▼
+    │   VoicePromptBuilder  (language, accent, gender, age, personality, emotion, speed, custom → instruct)
+    │       │
+    │       ▼
+    │   QwenTTSService[VoiceDesign].synthesize(text, language, instruct)
+    │       │
+    │       ▼
+    │   Qwen3TTSModel.generate_voice_design(...)  (loaded once at startup)
     │
-    ▼
-QwenTTSService.synthesize(text, language, instruct)
-    │
-    ▼
-Qwen3TTSModel.generate_voice_design(...)  (loaded once at startup)
-    │
-    ▼
-WAV file under outputs/
+    └── Voice Clone tab
+            │
+            ▼
+        QwenTTSService[Base].synthesize_voice_clone(text, language, ref_audio, ref_text)
+            │
+            ▼
+        Qwen3TTSModel.generate_voice_clone(...)  (loaded lazily, on first use)
+
+    Both paths write → WAV file under outputs/
 ```
 
-## 14. Tests & linting
+## 16. Tests & linting
 
 Tests fully mock the model — **they never load real Qwen3-TTS weights**:
 
@@ -231,18 +302,19 @@ uv run ruff check .
 uv run ruff format .
 ```
 
-## 15. Output files
+## 17. Output files
 
 Generated audio is written to `OUTPUT_DIR` (default `outputs/`) as WAV,
 never overwriting existing files:
 
 ```text
 {language}_{accent}_{gender}_{timestamp}.wav
-# e.g. spanish_peruvian_female_20260923_001530.wav
+# Voice Design, e.g.: spanish_peruvian_female_20260923_001530.wav
+# Voice Clone, e.g.:  english_clone_voice_20260923_020846.wav
 ```
 
-## 16. Session history
+## 18. Session history
 
-The UI keeps an in-memory table (timestamp, language, accent, gender, voice
-style, generation time, audio duration, RTF, filename) for the current
-browser session only — no database is used.
+The UI keeps an in-memory table (timestamp, mode, language, accent, gender,
+voice style, generation time, audio duration, RTF, filename) shared across
+both tabs, for the current browser session only — no database is used.

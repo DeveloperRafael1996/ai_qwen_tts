@@ -11,6 +11,7 @@ from qwen_tts_playground.tts_service import (
     CudaOutOfMemoryError,
     GenerationError,
     InvalidLanguageError,
+    InvalidReferenceAudioError,
     InvalidTextError,
     QwenTTSService,
     build_output_path,
@@ -36,6 +37,27 @@ class FakeQwen3TTSModel:
     def generate_voice_design(self, text, language, instruct, **kwargs):
         self.calls.append(
             {"text": text, "language": language, "instruct": instruct, "kwargs": kwargs}
+        )
+        if self.raise_oom:
+            raise torch.cuda.OutOfMemoryError("simulated CUDA OOM")
+        if self.raise_error:
+            raise RuntimeError("simulated generation failure")
+
+        wav = np.zeros(int(SAMPLE_RATE * AUDIO_SECONDS), dtype=np.float32)
+        return [wav], SAMPLE_RATE
+
+    def generate_voice_clone(
+        self, text, language, ref_audio, ref_text, x_vector_only_mode, **kwargs
+    ):
+        self.calls.append(
+            {
+                "text": text,
+                "language": language,
+                "ref_audio": ref_audio,
+                "ref_text": ref_text,
+                "x_vector_only_mode": x_vector_only_mode,
+                "kwargs": kwargs,
+            }
         )
         if self.raise_oom:
             raise torch.cuda.OutOfMemoryError("simulated CUDA OOM")
@@ -144,3 +166,90 @@ def test_build_output_path_never_overwrites(tmp_path):
 
     assert first != second
     assert not second.exists()
+
+
+def test_synthesize_voice_clone_icl_mode_success(service):
+    result = service.synthesize_voice_clone(
+        text="Hello there",
+        language="English",
+        ref_audio="/tmp/ref.wav",
+        ref_text="This is what the reference audio says.",
+    )
+
+    assert result.sample_rate == SAMPLE_RATE
+    assert Path(result.output_path).exists()
+    call = service._model.calls[-1]
+    assert call["ref_audio"] == "/tmp/ref.wav"
+    assert call["ref_text"] == "This is what the reference audio says."
+    assert call["x_vector_only_mode"] is False
+
+
+def test_synthesize_voice_clone_x_vector_mode_does_not_need_ref_text(service):
+    result = service.synthesize_voice_clone(
+        text="Hello there",
+        language="English",
+        ref_audio="/tmp/ref.wav",
+        ref_text=None,
+        x_vector_only_mode=True,
+    )
+    assert result.sample_rate == SAMPLE_RATE
+    call = service._model.calls[-1]
+    assert call["x_vector_only_mode"] is True
+
+
+def test_synthesize_voice_clone_missing_ref_audio_raises(service):
+    with pytest.raises(InvalidReferenceAudioError):
+        service.synthesize_voice_clone(text="Hello", language="English", ref_audio="")
+
+
+def test_synthesize_voice_clone_icl_mode_without_ref_text_raises(service):
+    with pytest.raises(InvalidReferenceAudioError):
+        service.synthesize_voice_clone(
+            text="Hello",
+            language="English",
+            ref_audio="/tmp/ref.wav",
+            ref_text=None,
+            x_vector_only_mode=False,
+        )
+
+
+def test_synthesize_voice_clone_empty_text_raises(service):
+    with pytest.raises(InvalidTextError):
+        service.synthesize_voice_clone(
+            text="  ", language="English", ref_audio="/tmp/ref.wav", ref_text="hi"
+        )
+
+
+def test_synthesize_voice_clone_cuda_oom_is_wrapped(service):
+    service._model.raise_oom = True
+    with pytest.raises(CudaOutOfMemoryError):
+        service.synthesize_voice_clone(
+            text="Hello", language="English", ref_audio="/tmp/ref.wav", ref_text="hi"
+        )
+
+
+def test_resolve_voice_clone_model_source_prefers_local_dir(tmp_path):
+    local_dir = tmp_path / "clone-model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+
+    settings = Settings(qwen_tts_voice_clone_model_path=str(local_dir))
+    assert settings.resolve_voice_clone_model_source() == str(local_dir)
+
+
+def test_resolve_voice_clone_model_source_falls_back_to_hf_repo(tmp_path):
+    settings = Settings(qwen_tts_voice_clone_model_path=str(tmp_path / "does-not-exist"))
+    assert settings.resolve_voice_clone_model_source() == "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+
+
+def test_qwen_tts_service_respects_model_source_override(
+    tmp_path, fake_qwen_tts_module, monkeypatch
+):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    settings = Settings(
+        qwen_tts_model_path=str(tmp_path / "voice-design-not-used"),
+        output_dir=tmp_path / "outputs",
+    )
+    svc = QwenTTSService(settings, model_source=str(tmp_path / "explicit-override"))
+    svc.load()
+    assert svc._model_source == str(tmp_path / "explicit-override")
