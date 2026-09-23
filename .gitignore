@@ -24,3 +24,6 @@ models/*/
 .pytest_cache/
 .ruff_cache/
 
+
+# Claude Code local state
+.claude/
