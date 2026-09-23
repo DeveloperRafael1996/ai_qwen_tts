@@ -28,8 +28,9 @@ variable "key_name" {
 }
 
 variable "repo_url" {
-  description = "HTTPS git URL of this project, e.g. https://github.com/<user>/ai_qwen_tts.git"
+  description = "HTTPS git URL of this project (public repo, so no token is needed)."
   type        = string
+  default     = "https://github.com/DeveloperRafael1996/ai_qwen_tts.git"
 }
 
 variable "repo_branch" {
@@ -39,7 +40,7 @@ variable "repo_branch" {
 }
 
 variable "github_token" {
-  description = "Read-only token, only needed if the repo is private. NOTE: it ends up in the instance user_data (readable by anyone with EC2 access to the instance). Use a fine-grained, read-only, single-repo token."
+  description = "Read-only token, only needed if the repo is private (the default repo is public). NOTE: it ends up in the instance user_data (readable by anyone with EC2 access to the instance). Use a fine-grained, read-only, single-repo token."
   type        = string
   default     = ""
   sensitive   = true
