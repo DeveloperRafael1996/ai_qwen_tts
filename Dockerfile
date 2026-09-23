@@ -76,7 +76,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # (multi-GB) and are intentionally not baked into the image. chown so the
 # non-root user below can write into them (and anything else under /app,
 # e.g. __pycache__ for the src/ tree).
-RUN mkdir -p models outputs && chown -R appuser:appuser /app
+# Do NOT `chown -R /app`: recursing into .venv rewrites every file into a new
+# layer, duplicating ~6GB of dependencies in the image. The app only needs to
+# write to /app itself, models/ and outputs/; .venv is read-only at runtime
+# (bytecode is precompiled via UV_COMPILE_BYTECODE).
+RUN mkdir -p models outputs \
+    && chown appuser:appuser /app models outputs \
+    && chown -R appuser:appuser src
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     HOME=/home/appuser \
