@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables
+.env
+
+# Generated audio outputs
+outputs/*.wav
+!outputs/.gitkeep
+
+# Local model snapshots (downloaded separately, not committed)
+models/*/
+!models/.gitkeep
+
+# Test / tool caches
+.pytest_cache/
+.ruff_cache/
+
