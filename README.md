@@ -315,6 +315,7 @@ qwen-tts-playground/
 ├── .env.example
 ├── .gitignore
 ├── Dockerfile
+├── docker-compose.yml
 ├── .dockerignore
 ├── models/                      # local model snapshots (gitignored)
 ├── outputs/                     # generated WAV files (gitignored)
@@ -447,6 +448,27 @@ Then open <http://127.0.0.1:7860>.
 - All three models are still loaded lazily on first use of their tab (§4) —
   starting the container is fast regardless of which/how many models are
   configured.
+
+### Run with Docker Compose
+
+A `docker-compose.yml` is also provided, wrapping the same build/run/volumes
+behavior above:
+
+```bash
+docker compose up --build     # build the image and start the app
+docker compose up -d          # start in the background (image already built)
+docker compose down           # stop and remove the container
+```
+
+- It uses `runtime: nvidia` (the form confirmed working on this host — see
+  the `--gpus all` note above). If you have no NVIDIA GPU, delete the
+  `runtime: nvidia` line and the two `NVIDIA_*` environment variables from
+  `docker-compose.yml` to run on CPU.
+- Copy `.env.example` to `.env` to override any setting from §5 (e.g.
+  `PLAYGROUND_PORT`) — `docker-compose.yml` loads it automatically
+  (`env_file`, optional) and it is *not* baked into the image.
+- `./models` and `./outputs` are bind-mounted the same way as the manual
+  `docker run` command, so models placed there per §4 are picked up as-is.
 
 ### Verified
 

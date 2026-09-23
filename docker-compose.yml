@@ -1,0 +1,42 @@
+# Qwen3-TTS Playground.
+#
+# Usage:
+#   docker compose up --build       # build the image and start the app
+#   docker compose up -d            # start in the background (image already built)
+#   docker compose down             # stop and remove the container
+#
+# GPU: uses the "nvidia" container runtime (confirmed working on this host;
+# the newer `deploy.resources.reservations.devices` / `--gpus all` form
+# failed here with a "cdi mode" error — see README §19). If your host has
+# no NVIDIA GPU/driver, delete the `runtime: nvidia` line and the two
+# NVIDIA_* environment variables below to run on CPU.
+#
+# Environment variables: copy .env.example to .env and edit it to override
+# any of the defaults below (e.g. PLAYGROUND_PORT, or the *_MODEL_PATH
+# variables if you rename the folders under ./models).
+services:
+  qwen-tts-playground:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qwen-tts-playground:latest
+    container_name: qwen-tts-playground
+    restart: unless-stopped
+    runtime: nvidia
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      PLAYGROUND_HOST: 0.0.0.0
+      PLAYGROUND_PORT: ${PLAYGROUND_PORT:-7860}
+      QWEN_TTS_MODEL_PATH: /app/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
+      QWEN_TTS_VOICE_CLONE_MODEL_PATH: /app/models/Qwen3-TTS-12Hz-0.6B-Base
+      QWEN_TTS_CUSTOM_VOICE_MODEL_PATH: /app/models/Qwen3-TTS-12Hz-0.6B-CustomVoice
+      OUTPUT_DIR: /app/outputs
+    ports:
+      - "${PLAYGROUND_PORT:-7860}:7860"
+    volumes:
+      - ./models:/app/models
+      - ./outputs:/app/outputs
