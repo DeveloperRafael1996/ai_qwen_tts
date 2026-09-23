@@ -910,16 +910,19 @@ def main() -> None:
     # loading (e.g. once you have enough VRAM, or want fail-fast at startup).
     # service.load()
 
-    # The voice-clone (Base) and CustomVoice models are loaded lazily on
-    # first use of their respective tabs, so a GPU that can only fit one
-    # model at a time (e.g. a 4-6GB laptop GPU) doesn't fail at startup just
-    # because all three models are configured.
+    # Keep Voice Design lazy because the 1.7B checkpoint can OOM on 4GB laptop GPUs.
+    # For the RTX 500 Ada 4GB, the smaller CustomVoice model is the safest one to
+    # preload at startup to reduce first-click latency without crashing the app.
     voice_clone_service = QwenTTSService(
         settings, model_source=settings.resolve_voice_clone_model_source()
     )
     custom_voice_service = QwenTTSService(
         settings, model_source=settings.resolve_custom_voice_model_source()
     )
+    try:
+        custom_voice_service.load()
+    except Exception:
+        logger.warning("CustomVoice preload failed at startup; it will load lazily on first use.")
 
     demo = build_ui(service, voice_clone_service, custom_voice_service, settings)
     demo.launch(server_name=settings.playground_host, server_port=settings.playground_port)
