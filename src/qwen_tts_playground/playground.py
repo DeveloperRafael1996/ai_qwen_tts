@@ -1,10 +1,11 @@
-"""Gradio web playground for Qwen3-TTS VoiceDesign + voice cloning.
+"""Gradio web playground for three Qwen3-TTS models, one per tab.
 
-Two models, two tabs:
   - Voice Design (Qwen3-TTS-12Hz-1.7B-VoiceDesign): text + natural-language
     style instruction -> speech.
   - Voice Clone (Qwen3-TTS-12Hz-0.6B-Base): text + a reference audio
     (+ reference text) -> speech in the reference speaker's voice.
+  - Custom Voice (Qwen3-TTS-12Hz-0.6B-CustomVoice): text + one of 9
+    predefined premium speakers -> speech in that speaker's voice.
 
 Run with:
     uv run python -m qwen_tts_playground.playground
@@ -21,6 +22,8 @@ from qwen_tts_playground.config import Settings, get_settings
 from qwen_tts_playground.models import AgeGroup, Emotion, Gender, Language, Personality, Speed
 from qwen_tts_playground.profiles import (
     BANKING_PRESET_NAMES,
+    CUSTOM_VOICE_SPEAKER_NAMES,
+    CUSTOM_VOICE_SPEAKERS,
     SAMPLE_TEXTS,
     VOICE_PRESET_NAMES,
     VOICE_PRESETS,
@@ -35,10 +38,18 @@ logger = logging.getLogger(__name__)
 
 VOICE_DESIGN_MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 VOICE_CLONE_MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-0.6B-Base"
+CUSTOM_VOICE_MODEL_DISPLAY_NAME = "Qwen3-TTS-12Hz-0.6B-CustomVoice"
 
 CLONE_MODE_ICL = "In-Context Learning (needs reference text)"
 CLONE_MODE_X_VECTOR = "Speaker Embedding Only (x-vector)"
 CLONE_MODE_CHOICES = [CLONE_MODE_ICL, CLONE_MODE_X_VECTOR]
+
+DEFAULT_CUSTOM_VOICE_SPEAKER = "Ryan"
+
+CUSTOM_VOICE_SPEAKER_LEGEND = "\n".join(
+    f"- **{name}** — {speaker.description} (native: {speaker.native_language})"
+    for name, speaker in CUSTOM_VOICE_SPEAKERS.items()
+)
 
 LANGUAGE_CHOICES = [Language.SPANISH.value, Language.PORTUGUESE.value, Language.ENGLISH.value]
 GENDER_CHOICES = [Gender.FEMALE.value, Gender.MALE.value]
@@ -108,7 +119,13 @@ def _on_language_change(language: str, preset_guard: int):
     )
 
 
-def _on_clone_language_change(language: str):
+def _on_sample_text_language_change(language: str):
+    """Refresh the default sample text + char count for a language-only tab.
+
+    Used by tabs that don't have an `accent` axis (Voice Clone, Custom
+    Voice), unlike `_on_language_change` which also manages the Voice
+    Design tab's accent dropdown.
+    """
     sample_text = SAMPLE_TEXTS.get(language, "")
     return sample_text, _char_count_label(sample_text)
 
@@ -220,7 +237,10 @@ def _history_row(
 
 
 def build_ui(
-    service: QwenTTSService, voice_clone_service: QwenTTSService, settings: Settings
+    service: QwenTTSService,
+    voice_clone_service: QwenTTSService,
+    custom_voice_service: QwenTTSService,
+    settings: Settings,
 ) -> gr.Blocks:
     def generate_audio(
         text: str,
@@ -416,6 +436,69 @@ def build_ui(
             new_rows,
         )
 
+    def generate_custom_voice(
+        text: str,
+        language: str,
+        speaker: str,
+        instruct: str,
+        seed: float | None,
+        temperature: float | None,
+        top_p: float | None,
+        top_k: float | None,
+        history_rows: list,
+    ):
+        try:
+            if not custom_voice_service.is_loaded:
+                logger.info("Lazily loading Custom Voice model (first use this session)...")
+                custom_voice_service.load()
+
+            output_path = build_output_path(settings.output_dir, language, speaker, "voice")
+            result = custom_voice_service.synthesize_custom_voice(
+                text=text,
+                language=language,
+                speaker=speaker,
+                instruct=instruct or None,
+                output_path=output_path,
+                temperature=float(temperature) if temperature else None,
+                top_p=float(top_p) if top_p else None,
+                top_k=int(top_k) if top_k else None,
+                seed=int(seed) if seed else None,
+            )
+        except TTSServiceError as exc:
+            logger.warning("Custom-voice synthesis rejected: %s", exc)
+            return (
+                None,
+                gr.update(),
+                _format_gpu_markdown(custom_voice_service),
+                f"Error: {exc}",
+                history_rows,
+                history_rows,
+            )
+        except Exception:
+            logger.exception("Unexpected error during custom-voice synthesis")
+            return (
+                None,
+                gr.update(),
+                _format_gpu_markdown(custom_voice_service),
+                "Error: an unexpected error occurred. Check server logs for details.",
+                history_rows,
+                history_rows,
+            )
+
+        perf_md = _format_perf_markdown(result, CUSTOM_VOICE_MODEL_DISPLAY_NAME, language, "-", "-")
+        gpu_md = _format_gpu_markdown(custom_voice_service)
+        row = _history_row(result, "Custom Voice", language, "-", "-", speaker)
+        new_rows = [*history_rows, row]
+
+        return (
+            str(result.output_path),
+            perf_md,
+            gpu_md,
+            "Audio generated successfully.",
+            new_rows,
+            new_rows,
+        )
+
     with gr.Blocks(title="Qwen3-TTS VoiceDesign Playground") as demo:
         gr.Markdown("# Qwen3-TTS VoiceDesign Playground")
         gr.Markdown(
@@ -588,6 +671,59 @@ def build_ui(
                     clone_perf_info = gr.Markdown("")
                     clone_gpu_info = gr.Markdown(_format_gpu_markdown(voice_clone_service))
 
+        with gr.Tab("Custom Voice"):
+            gr.Markdown(
+                "Generate speech with one of 9 predefined premium speakers using "
+                "**Qwen3-TTS-12Hz-0.6B-CustomVoice**. This model is loaded lazily, on the "
+                "first click below."
+            )
+            with gr.Row():
+                with gr.Column(scale=1):
+                    cv_language = gr.Dropdown(
+                        LANGUAGE_CHOICES, value=DEFAULT_LANGUAGE, label="Language"
+                    )
+                    cv_speaker = gr.Dropdown(
+                        CUSTOM_VOICE_SPEAKER_NAMES,
+                        value=DEFAULT_CUSTOM_VOICE_SPEAKER,
+                        label="Speaker",
+                    )
+                    gr.Markdown(CUSTOM_VOICE_SPEAKER_LEGEND)
+
+                    cv_text_input = gr.Textbox(
+                        value=SAMPLE_TEXTS[DEFAULT_LANGUAGE],
+                        label="Text to synthesize",
+                        lines=4,
+                    )
+                    cv_char_count = gr.Markdown(_char_count_label(SAMPLE_TEXTS[DEFAULT_LANGUAGE]))
+
+                    cv_instruct = gr.Textbox(
+                        label="Style Instruction (optional)",
+                        placeholder="e.g. Speak in a very happy tone",
+                        lines=2,
+                    )
+                    gr.Markdown(
+                        "_Note: the currently installed `qwen-tts` package silently ignores "
+                        "this instruction for the 0.6B CustomVoice checkpoint, even though the "
+                        "model card shows an instruct example. It's left here in case a future "
+                        "package version enables it — see the README for details._"
+                    )
+
+                    with gr.Accordion("Advanced Settings", open=False):
+                        cv_seed = gr.Number(label="Seed (optional)", value=None, precision=0)
+                        cv_temperature = gr.Slider(
+                            0.1, 1.5, value=0.9, step=0.05, label="Temperature"
+                        )
+                        cv_top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="Top P")
+                        cv_top_k = gr.Slider(0, 100, value=50, step=1, label="Top K")
+
+                    generate_cv_btn = gr.Button("Generate Audio", variant="primary")
+
+                with gr.Column(scale=1):
+                    cv_audio_output = gr.Audio(label="Generated Audio", autoplay=False)
+                    cv_status = gr.Markdown("")
+                    cv_perf_info = gr.Markdown("")
+                    cv_gpu_info = gr.Markdown(_format_gpu_markdown(custom_voice_service))
+
         gr.Markdown("## Session History")
         history_table = gr.Dataframe(headers=HISTORY_HEADERS, value=[], wrap=True)
 
@@ -683,7 +819,7 @@ def build_ui(
         )
 
         clone_language.change(
-            fn=_on_clone_language_change,
+            fn=_on_sample_text_language_change,
             inputs=[clone_language],
             outputs=[clone_text_input, clone_char_count],
         )
@@ -722,6 +858,37 @@ def build_ui(
             ],
         )
 
+        cv_language.change(
+            fn=_on_sample_text_language_change,
+            inputs=[cv_language],
+            outputs=[cv_text_input, cv_char_count],
+        )
+
+        cv_text_input.change(fn=_char_count_label, inputs=[cv_text_input], outputs=[cv_char_count])
+
+        generate_cv_btn.click(
+            fn=generate_custom_voice,
+            inputs=[
+                cv_text_input,
+                cv_language,
+                cv_speaker,
+                cv_instruct,
+                cv_seed,
+                cv_temperature,
+                cv_top_p,
+                cv_top_k,
+                history_state,
+            ],
+            outputs=[
+                cv_audio_output,
+                cv_perf_info,
+                cv_gpu_info,
+                cv_status,
+                history_state,
+                history_table,
+            ],
+        )
+
     return demo
 
 
@@ -743,14 +910,18 @@ def main() -> None:
     # loading (e.g. once you have enough VRAM, or want fail-fast at startup).
     # service.load()
 
-    # The voice-clone (Base) model is loaded lazily on first use of that tab,
-    # so a GPU that can only fit one model at a time (e.g. a 4-6GB laptop
-    # GPU) doesn't fail at startup just because both models are configured.
+    # The voice-clone (Base) and CustomVoice models are loaded lazily on
+    # first use of their respective tabs, so a GPU that can only fit one
+    # model at a time (e.g. a 4-6GB laptop GPU) doesn't fail at startup just
+    # because all three models are configured.
     voice_clone_service = QwenTTSService(
         settings, model_source=settings.resolve_voice_clone_model_source()
     )
+    custom_voice_service = QwenTTSService(
+        settings, model_source=settings.resolve_custom_voice_model_source()
+    )
 
-    demo = build_ui(service, voice_clone_service, settings)
+    demo = build_ui(service, voice_clone_service, custom_voice_service, settings)
     demo.launch(server_name=settings.playground_host, server_port=settings.playground_port)
 
 

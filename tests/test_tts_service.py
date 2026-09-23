@@ -12,6 +12,7 @@ from qwen_tts_playground.tts_service import (
     GenerationError,
     InvalidLanguageError,
     InvalidReferenceAudioError,
+    InvalidSpeakerError,
     InvalidTextError,
     QwenTTSService,
     build_output_path,
@@ -56,6 +57,24 @@ class FakeQwen3TTSModel:
                 "ref_audio": ref_audio,
                 "ref_text": ref_text,
                 "x_vector_only_mode": x_vector_only_mode,
+                "kwargs": kwargs,
+            }
+        )
+        if self.raise_oom:
+            raise torch.cuda.OutOfMemoryError("simulated CUDA OOM")
+        if self.raise_error:
+            raise RuntimeError("simulated generation failure")
+
+        wav = np.zeros(int(SAMPLE_RATE * AUDIO_SECONDS), dtype=np.float32)
+        return [wav], SAMPLE_RATE
+
+    def generate_custom_voice(self, text, language, speaker, instruct, **kwargs):
+        self.calls.append(
+            {
+                "text": text,
+                "language": language,
+                "speaker": speaker,
+                "instruct": instruct,
                 "kwargs": kwargs,
             }
         )
@@ -253,3 +272,55 @@ def test_qwen_tts_service_respects_model_source_override(
     svc = QwenTTSService(settings, model_source=str(tmp_path / "explicit-override"))
     svc.load()
     assert svc._model_source == str(tmp_path / "explicit-override")
+
+
+def test_resolve_custom_voice_model_source_prefers_local_dir(tmp_path):
+    local_dir = tmp_path / "custom-voice-model"
+    local_dir.mkdir()
+    (local_dir / "config.json").write_text("{}")
+
+    settings = Settings(qwen_tts_custom_voice_model_path=str(local_dir))
+    assert settings.resolve_custom_voice_model_source() == str(local_dir)
+
+
+def test_resolve_custom_voice_model_source_falls_back_to_hf_repo(tmp_path):
+    settings = Settings(qwen_tts_custom_voice_model_path=str(tmp_path / "does-not-exist"))
+    assert settings.resolve_custom_voice_model_source() == "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+
+
+def test_synthesize_custom_voice_success(service):
+    result = service.synthesize_custom_voice(text="Hello there", language="English", speaker="Ryan")
+    assert result.sample_rate == SAMPLE_RATE
+    assert Path(result.output_path).exists()
+    call = service._model.calls[-1]
+    assert call["speaker"] == "Ryan"
+    assert call["instruct"] is None
+
+
+def test_synthesize_custom_voice_forwards_instruct(service):
+    service.synthesize_custom_voice(
+        text="Hello", language="English", speaker="Ryan", instruct="Speak happily"
+    )
+    call = service._model.calls[-1]
+    assert call["instruct"] == "Speak happily"
+
+
+def test_synthesize_custom_voice_missing_speaker_raises(service):
+    with pytest.raises(InvalidSpeakerError):
+        service.synthesize_custom_voice(text="Hello", language="English", speaker="")
+
+
+def test_synthesize_custom_voice_empty_text_raises(service):
+    with pytest.raises(InvalidTextError):
+        service.synthesize_custom_voice(text="  ", language="English", speaker="Ryan")
+
+
+def test_synthesize_custom_voice_invalid_language_raises(service):
+    with pytest.raises(InvalidLanguageError):
+        service.synthesize_custom_voice(text="Hello", language="French", speaker="Ryan")
+
+
+def test_synthesize_custom_voice_cuda_oom_is_wrapped(service):
+    service._model.raise_oom = True
+    with pytest.raises(CudaOutOfMemoryError):
+        service.synthesize_custom_voice(text="Hello", language="English", speaker="Ryan")

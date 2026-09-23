@@ -1,10 +1,11 @@
-"""Encapsulates loading and running a Qwen3-TTS model (VoiceDesign or Base).
+"""Encapsulates loading and running one Qwen3-TTS model: VoiceDesign, Base
+(voice cloning), or CustomVoice.
 
 The model is loaded exactly once (see `QwenTTSService.load`) and every
-subsequent `synthesize()`/`synthesize_voice_clone()` call reuses the
-already-loaded weights. GPU inference is protected by a lock so that
-concurrent UI clicks cannot launch overlapping `generate()` calls on the same
-model instance.
+subsequent `synthesize()` / `synthesize_voice_clone()` /
+`synthesize_custom_voice()` call reuses the already-loaded weights. GPU
+inference is protected by a lock so that concurrent UI clicks cannot launch
+overlapping `generate()` calls on the same model instance.
 """
 
 from __future__ import annotations
@@ -57,6 +58,10 @@ class CudaOutOfMemoryError(TTSServiceError):
 
 class InvalidReferenceAudioError(TTSServiceError):
     """Raised when voice-clone reference audio/text is missing or invalid."""
+
+
+class InvalidSpeakerError(TTSServiceError):
+    """Raised when no (or an unsupported) CustomVoice speaker is selected."""
 
 
 SUPPORTED_LANGUAGES = {"spanish", "portuguese", "english"}
@@ -136,8 +141,9 @@ def _gpu_summary() -> str:
 class QwenTTSService:
     """Loads one Qwen3-TTS model once and serves thread-safe synthesis calls.
 
-    Works with either a VoiceDesign checkpoint (use `synthesize()`) or a Base
-    voice-cloning checkpoint (use `synthesize_voice_clone()`), depending on
+    Works with a VoiceDesign checkpoint (use `synthesize()`), a Base
+    voice-cloning checkpoint (use `synthesize_voice_clone()`), or a
+    CustomVoice checkpoint (use `synthesize_custom_voice()`), depending on
     which `model_source` was loaded. Pass an explicit `model_source` to pick
     which model this instance loads; if omitted, it falls back to
     `settings.resolve_model_source()` (the VoiceDesign model).
@@ -299,6 +305,80 @@ class QwenTTSService:
                 ) from exc
             except Exception as exc:
                 logger.error("Generation failed:\n%s", traceback.format_exc())
+                raise GenerationError(f"Generation failed: {exc}") from exc
+
+            generation_time = time.perf_counter() - start
+
+        return _write_result(wavs, sample_rate, generation_time, output_path)
+
+    def synthesize_custom_voice(
+        self,
+        text: str,
+        language: str,
+        speaker: str,
+        instruct: str | None = None,
+        output_path: Path | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        seed: int | None = None,
+    ) -> TTSResult:
+        """Generate speech with a predefined CustomVoice speaker.
+
+        `instruct` is forwarded to the model, but note that the currently
+        installed `qwen-tts` package silently ignores it for the 0.6B
+        CustomVoice checkpoint (it forces `instruct=None` for that model
+        size) even though that model's card shows an instruct example.
+        """
+        if not text or not text.strip():
+            raise InvalidTextError("Text to synthesize must not be empty.")
+
+        if language.lower() not in SUPPORTED_LANGUAGES:
+            raise InvalidLanguageError(
+                f"Unsupported language '{language}'. Supported: Spanish, Portuguese, English."
+            )
+
+        if not speaker or not speaker.strip():
+            raise InvalidSpeakerError("A speaker must be selected for CustomVoice.")
+
+        if self._model is None:
+            raise ModelNotFoundError("Model is not loaded. Call load() before synthesize.")
+
+        if output_path is None:
+            output_path = build_output_path(self._settings.output_dir, language, speaker, "voice")
+
+        with self._lock:
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+            gen_kwargs: dict = {}
+            if temperature is not None:
+                gen_kwargs["temperature"] = temperature
+            if top_p is not None:
+                gen_kwargs["top_p"] = top_p
+            if top_k is not None:
+                gen_kwargs["top_k"] = top_k
+
+            start = time.perf_counter()
+            try:
+                wavs, sample_rate = self._model.generate_custom_voice(
+                    text=text,
+                    language=language,
+                    speaker=speaker,
+                    instruct=instruct or None,
+                    **gen_kwargs,
+                )
+            except torch.cuda.OutOfMemoryError as exc:
+                torch.cuda.empty_cache()
+                logger.error("CUDA OOM during custom-voice generation:\n%s", traceback.format_exc())
+                raise CudaOutOfMemoryError(
+                    "CUDA ran out of memory during generation. Try shorter text, "
+                    "reduce max_new_tokens, or free VRAM from other processes."
+                ) from exc
+            except Exception as exc:
+                logger.error("Custom-voice generation failed:\n%s", traceback.format_exc())
                 raise GenerationError(f"Generation failed: {exc}") from exc
 
             generation_time = time.perf_counter() - start

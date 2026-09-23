@@ -1,7 +1,7 @@
 # Qwen3-TTS VoiceDesign Playground
 
 A local, professional web playground to experiment with **text-to-speech**
-in Spanish, Portuguese and English, with two tabs backed by two different
+in Spanish, Portuguese and English, with three tabs backed by three different
 Qwen3-TTS models:
 
 - **Voice Design** — [`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign):
@@ -10,6 +10,8 @@ Qwen3-TTS models:
 - **Voice Clone** — [`Qwen/Qwen3-TTS-12Hz-0.6B-Base`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base):
   clone a voice from a short reference audio clip (+ optional reference
   text) instead of describing it with words.
+- **Custom Voice** — [`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice):
+  generate speech with one of 9 predefined premium speakers.
 
 ```text
 Voice Design tab:
@@ -19,6 +21,9 @@ Language → Accent → Gender → Age → Personality → Emotion → Speed
 Voice Clone tab:
 Language → Reference Audio (+ Reference Text) → Text → Generate
     → Qwen3-TTS-0.6B-Base → Audio Player
+
+Custom Voice tab:
+Language → Speaker → Text → Generate → Qwen3-TTS-0.6B-CustomVoice → Audio Player
 ```
 
 ---
@@ -65,7 +70,7 @@ declared in `pyproject.toml` (`qwen-tts`, `gradio`, `soundfile`, `pydantic`,
 
 ## 4. Getting the models
 
-This app uses two separate Qwen3-TTS checkpoints, one per tab.
+This app uses three separate Qwen3-TTS checkpoints, one per tab.
 
 ### Option A — download them locally (recommended for repeated use)
 
@@ -77,6 +82,10 @@ uv run hf download \
 uv run hf download \
   Qwen/Qwen3-TTS-12Hz-0.6B-Base \
   --local-dir ./models/Qwen3-TTS-12Hz-0.6B-Base
+
+uv run hf download \
+  Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice \
+  --local-dir ./models/Qwen3-TTS-12Hz-0.6B-CustomVoice
 ```
 
 Then point the app at them via `.env`:
@@ -84,26 +93,29 @@ Then point the app at them via `.env`:
 ```env
 QWEN_TTS_MODEL_PATH=./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
 QWEN_TTS_VOICE_CLONE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-Base
+QWEN_TTS_CUSTOM_VOICE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-CustomVoice
 ```
 
 ### Option B — stream from the Hugging Face Hub
 
-If either path does not exist (or is empty), the app falls back to the
-matching Hub repo id (`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign` or
-`Qwen/Qwen3-TTS-12Hz-0.6B-Base`) directly, letting `from_pretrained` download
-and cache it under `~/.cache/huggingface`.
+If a path does not exist (or is empty), the app falls back to the matching
+Hub repo id (`Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign`,
+`Qwen/Qwen3-TTS-12Hz-0.6B-Base`, or `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`)
+directly, letting `from_pretrained` download and cache it under
+`~/.cache/huggingface`.
 
 ### Loading behavior
 
-Both models are currently loaded **lazily**: nothing is loaded at process
-startup, and each model loads (once) on the first "Generate..." click in its
-tab, then stays cached in memory for the rest of the session (never reloaded
-per-request).
+All three models are currently loaded **lazily**: nothing is loaded at
+process startup, and each model loads (once) on the first "Generate..."
+click in its tab, then stays cached in memory for the rest of the session
+(never reloaded per-request).
 
 This is deliberate: many GPUs (e.g. a 4-6GB laptop GPU) cannot even fit the
-1.7B VoiceDesign model on its own, let alone both models at once, so eager
-loading at startup would crash the whole app before it serves a single
-page. See §12 for VRAM numbers observed in practice.
+1.7B VoiceDesign model on its own, let alone all three models at once, so
+eager loading at startup would crash the whole app before it serves a
+single page. See §12 for VRAM numbers observed in practice (in short: the
+two 0.6B models fit comfortably on a 4GB GPU; the 1.7B one does not).
 
 If your hardware can comfortably fit the VoiceDesign model, you can restore
 eager loading (load-once-at-startup, fail-fast instead of failing on first
@@ -117,6 +129,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 ```env
 QWEN_TTS_MODEL_PATH=./models/Qwen3-TTS-12Hz-1.7B-VoiceDesign
 QWEN_TTS_VOICE_CLONE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-Base
+QWEN_TTS_CUSTOM_VOICE_MODEL_PATH=./models/Qwen3-TTS-12Hz-0.6B-CustomVoice
 PLAYGROUND_HOST=127.0.0.1
 PLAYGROUND_PORT=7860
 OUTPUT_DIR=outputs
@@ -188,14 +201,58 @@ reference recording of a real voice:
 This tab's model (`Qwen3-TTS-12Hz-0.6B-Base`) loads on the first click, not
 at startup — see §4.
 
+## 11. Custom Voice tab
+
+Pick one of 9 predefined premium speakers and generate speech directly, no
+accent/age/personality/emotion/speed axes needed — the speaker's voice
+already carries its own character:
+
+1. Pick a **Language**. Every speaker works with any of the three
+   supported languages, but each one has a **native language** (shown next
+   to its name) where quality is typically best.
+2. Pick a **Speaker**: `Vivian`, `Serena`, `Uncle_Fu`, `Dylan`, `Eric`,
+   `Ryan`, `Aiden`, `Ono_Anna`, `Sohee` — descriptions are shown in the tab.
+3. Write the **Text to synthesize** and click **Generate Audio**.
+
+An optional **Style Instruction** field is also shown (e.g. "Speak in a
+very happy tone") — this maps to the model's `instruct` parameter, which
+the underlying architecture supports. However, **the currently installed
+`qwen-tts` package (0.1.1) silently forces `instruct=None` for the 0.6B
+CustomVoice checkpoint** regardless of what you type, even though that
+model's own card shows an instruct example. This app forwards whatever you
+type anyway (in case a future `qwen-tts` release changes this), but don't
+expect it to have any audible effect right now — verified against the
+installed package's source (`qwen3_tts_model.py`):
+`if self.model.tts_model_size in "0b6": instruct = None`.
+
+This tab's model (`Qwen3-TTS-12Hz-0.6B-CustomVoice`) loads on the first
+click, not at startup — see §4.
+
 ## 12. GPU usage & performance metrics
 
 - Each model loads once as `cuda:0` + `torch.bfloat16` when a CUDA GPU is
   available (`float32` on CPU).
 - `attn_implementation="flash_attention_2"` is used automatically **only**
   if the `flash-attn` package is importable; otherwise the default
-  (SDPA/eager) attention implementation is used. FlashAttention is never a
-  hard requirement.
+  (SDPA/eager) attention implementation is used, and you'll see:
+  `Warning: flash-attn is not installed. Will only run the manual PyTorch
+  version.` FlashAttention is never a hard requirement — this warning is
+  safe to ignore.
+
+  Note: `flash-attn` does not publish prebuilt wheels to PyPI, only to its
+  GitHub releases, and its newest prebuilt wheels lag behind the newest
+  PyTorch/CUDA releases (e.g. as of writing, the latest wheels target up to
+  `torch2.9+cu13`/`torch2.8+cu12`). If `uv sync` resolves a newer `torch`
+  than that (common, since `qwen-tts` doesn't pin a `torch` version), there
+  is no matching prebuilt wheel, and installing `flash-attn` would either
+  fail an ABI check against a mismatched wheel or require building from
+  source with the full CUDA Toolkit (`nvcc`, not just the driver) — a slow
+  build with a limited payoff here, since flash-attn mainly saves memory on
+  long attention sequences, and TTS prompts here are short; the real VRAM
+  pressure comes from model weight size, which flash-attn doesn't change.
+  If you want it anyway, either pin `torch`/`torchaudio` to a version with a
+  matching prebuilt wheel (see §2 for pinning a specific CUDA index) or
+  install the CUDA Toolkit and build from source.
 - Every generation reports:
   - **Generation time** (`time.perf_counter()`)
   - **Audio duration** (`len(wav) / sample_rate`)
@@ -206,34 +263,41 @@ at startup — see §4.
 
 Numbers observed on a 4GB laptop GPU (NVIDIA RTX 500 Ada, 3.65 GiB usable):
 the 1.7B VoiceDesign model does **not** fit (`CudaOutOfMemoryError` while
-loading), while the 0.6B Base voice-clone model **does** fit comfortably
-(~2.1 GiB allocated, 1.4 GiB still free) and produced audio with RTF ≈ 1.3.
+loading), while both 0.6B models fit comfortably one at a time:
+
+| Model | VRAM allocated | RTF observed |
+| --- | --- | --- |
+| 0.6B Base (Voice Clone, ICL mode) | ~2.06 GiB | ≈ 1.31 |
+| 0.6B CustomVoice | ~2.02 GiB | ≈ 2.15 |
+| 1.7B VoiceDesign | OOM at load | N/A (falls back to CPU) |
+
 Your mileage will vary with driver/CUDA version and other processes holding
-VRAM — see §13 for the VoiceDesign fallback.
+VRAM — see §14 for the VoiceDesign fallback.
 
 ## 13. Thread safety
 
 GPU inference is serialized behind a lock in `QwenTTSService`. Concurrent
 clicks in the UI queue instead of racing on the same model instance, which
 avoids state corruption and reduces OOM risk from overlapping generations.
-Each tab's model has its own `QwenTTSService` instance/lock, so a Voice
-Design generation and a Voice Clone generation could in principle run
-concurrently — but on a single GPU with limited VRAM, running both tabs at
-once is likely to OOM; prefer using one tab at a time on constrained
-hardware.
+Each tab's model has its own `QwenTTSService` instance/lock, so generations
+in different tabs could in principle run concurrently — but on a single GPU
+with limited VRAM, running two or three tabs at once is likely to OOM;
+prefer using one tab at a time on constrained hardware.
 
 ## 14. Troubleshooting CUDA OOM
 
-Both models need a few GB of VRAM (more for the 1.7B VoiceDesign model)
-plus activation memory that scales with text length. If you hit
+All three models need VRAM (much more for the 1.7B VoiceDesign model than
+for either 0.6B model) plus activation memory that scales with text
+length. If you hit
 `CudaOutOfMemoryError`, whether while loading a model or during generation:
 
 - Shorten the input text or split it into shorter segments.
 - Close other GPU-using processes (check with `nvidia-smi`).
 - Lower `max_new_tokens` via **Advanced Settings** if exposed, or reduce
   `Top K`/`Top P` sampling breadth.
-- Try the smaller Voice Clone (0.6B) model instead of VoiceDesign (1.7B) if
-  your GPU can't fit the larger one — see the VRAM numbers in §12.
+- Try one of the smaller 0.6B models (Voice Clone or Custom Voice) instead
+  of VoiceDesign (1.7B) if your GPU can't fit the larger one — see the VRAM
+  numbers in §12.
 - If you are on a GPU with very limited VRAM (e.g. 4-6 GB laptop GPUs), fall
   back to CPU by unsetting CUDA (`CUDA_VISIBLE_DEVICES=""`) — generation will
   be much slower but still functional for evaluation purposes.
@@ -258,18 +322,18 @@ qwen-tts-playground/
 │   └── test_tts_service.py
 └── src/qwen_tts_playground/
     ├── __init__.py
-    ├── config.py                # pydantic-settings env config (2 model paths)
+    ├── config.py                # pydantic-settings env config (3 model paths)
     ├── models.py                 # enums + pydantic result models
-    ├── profiles.py                # accents, ages, speeds, presets (data)
+    ├── profiles.py                # accents, ages, speeds, presets, speakers (data)
     ├── prompt_builder.py          # VoicePromptBuilder -> single instruct
-    ├── tts_service.py             # QwenTTSService: load once, synthesize (+ clone)
-    └── playground.py              # Gradio UI: Voice Design tab + Voice Clone tab
+    ├── tts_service.py             # QwenTTSService: load once, synthesize/clone/custom-voice
+    └── playground.py              # Gradio UI: Voice Design + Voice Clone + Custom Voice tabs
 ```
 
 Architecture:
 
 ```text
-Playground (Gradio UI, 2 tabs)
+Playground (Gradio UI, 3 tabs)
     │
     ├── Voice Design tab
     │       │
@@ -282,15 +346,23 @@ Playground (Gradio UI, 2 tabs)
     │       ▼
     │   Qwen3TTSModel.generate_voice_design(...)  (loaded lazily, on first use)
     │
-    └── Voice Clone tab
+    ├── Voice Clone tab
+    │       │
+    │       ▼
+    │   QwenTTSService[Base].synthesize_voice_clone(text, language, ref_audio, ref_text)
+    │       │
+    │       ▼
+    │   Qwen3TTSModel.generate_voice_clone(...)  (loaded lazily, on first use)
+    │
+    └── Custom Voice tab
             │
             ▼
-        QwenTTSService[Base].synthesize_voice_clone(text, language, ref_audio, ref_text)
+        QwenTTSService[CustomVoice].synthesize_custom_voice(text, language, speaker, instruct)
             │
             ▼
-        Qwen3TTSModel.generate_voice_clone(...)  (loaded lazily, on first use)
+        Qwen3TTSModel.generate_custom_voice(...)  (loaded lazily, on first use)
 
-    Both paths write → WAV file under outputs/
+    All three paths write → WAV file under outputs/
 ```
 
 ## 16. Tests & linting
@@ -315,8 +387,9 @@ never overwriting existing files:
 
 ```text
 {language}_{accent}_{gender}_{timestamp}.wav
-# Voice Design, e.g.: spanish_peruvian_female_20260923_001530.wav
-# Voice Clone, e.g.:  english_clone_voice_20260923_020846.wav
+# Voice Design, e.g.:  spanish_peruvian_female_20260923_001530.wav
+# Voice Clone, e.g.:   english_clone_voice_20260923_020846.wav
+# Custom Voice, e.g.:  english_ryan_voice_20260923_141543.wav
 ```
 
 ## 18. Session history

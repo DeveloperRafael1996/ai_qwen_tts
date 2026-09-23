@@ -1,7 +1,7 @@
-"""Static VoiceDesign profile data: accents, ages, speeds, emotions, presets.
+"""Static profile data for all three tabs: VoiceDesign, Voice Clone, CustomVoice.
 
-IMPORTANT: accents below are *requested* through natural-language `instruct`
-text sent to the VoiceDesign model. They are not guaranteed regional accents
+IMPORTANT: VoiceDesign accents below are *requested* through natural-language
+`instruct` text sent to the model. They are not guaranteed regional accents
 and must be evaluated by ear, generation by generation. See the README for
 details on the difference between `language` (sent literally to the model)
 and `accent` (a style requested via instruction text).
@@ -427,3 +427,32 @@ VOICE_PRESETS: dict[str, VoicePreset] = {
 }
 
 VOICE_PRESET_NAMES: list[str] = list(VOICE_PRESETS.keys())
+
+
+# ---------------------------------------------------------------------------
+# CustomVoice speakers (Qwen3-TTS-12Hz-0.6B-CustomVoice), from the model card.
+# The id sent to the model is case-insensitive on their side; we send the
+# display name as-is.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CustomVoiceSpeaker:
+    id: str
+    description: str
+    native_language: str
+
+
+CUSTOM_VOICE_SPEAKERS: dict[str, CustomVoiceSpeaker] = {
+    "Vivian": CustomVoiceSpeaker("Vivian", "Bright young female voice.", "Chinese"),
+    "Serena": CustomVoiceSpeaker("Serena", "Warm, gentle young female voice.", "Chinese"),
+    "Uncle_Fu": CustomVoiceSpeaker("Uncle_Fu", "Seasoned male voice, mellow timbre.", "Chinese"),
+    "Dylan": CustomVoiceSpeaker("Dylan", "Youthful Beijing male voice.", "Chinese (Beijing)"),
+    "Eric": CustomVoiceSpeaker("Eric", "Lively Chengdu male voice.", "Chinese (Sichuan)"),
+    "Ryan": CustomVoiceSpeaker("Ryan", "Dynamic male voice with rhythm.", "English"),
+    "Aiden": CustomVoiceSpeaker("Aiden", "Sunny American male voice.", "English"),
+    "Ono_Anna": CustomVoiceSpeaker("Ono_Anna", "Playful Japanese female voice.", "Japanese"),
+    "Sohee": CustomVoiceSpeaker("Sohee", "Warm Korean female voice.", "Korean"),
+}
+
+CUSTOM_VOICE_SPEAKER_NAMES: list[str] = list(CUSTOM_VOICE_SPEAKERS.keys())
