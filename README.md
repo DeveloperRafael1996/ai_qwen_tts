@@ -416,9 +416,26 @@ into the container.
 docker build -t qwen-tts-playground .
 ```
 
-The image is ~6.7 GB (mostly PyTorch + CUDA runtime libraries) and takes a
-while the first time; `uv sync` layers are cached separately from source
-code changes, so rebuilding after editing `src/` is fast.
+The image is ~6.7 GB and takes a while the first time; `uv sync` layers are
+cached separately from source code changes, so rebuilding after editing
+`src/` is fast.
+
+**Why it's this big / what's already trimmed:** ~75% of the image is the
+CUDA + PyTorch + Triton stack itself — `nvidia/*` wheels (cuBLAS, cuDNN,
+cuFFT, NCCL, cuSPARSELt, NVSHMEM: ~3.2 GB), `torch` (~1.2 GB), `triton`
+(~0.9 GB after trimming, see below). This is not really reducible without
+dropping GPU support: NCCL, cuSPARSELt and NVSHMEM are hard-linked into
+`torch._C` at import time in this wheel even though a single-GPU app never
+uses them — deleting any of them breaks `import torch` outright (verified).
+What *was* safe to remove (and already is, in the `Dockerfile`): Triton's
+bundled CUPTI profiler static libs and torch's C++ headers (`torch/include`,
+only needed to build custom extensions) — together ~340 MB, confirmed
+unused by re-running a real Triton JIT kernel compile and
+`scaled_dot_product_attention` after deleting them. One gotcha if you touch
+this: the `rm -rf` for these has to live in the *same* `RUN` as the `uv
+sync` that installs them — overlayfs layers are additive, so deleting files
+in a later layer only hides them (0 bytes saved on the image) while the
+bytes still ship in the earlier layer.
 
 ### Run
 
@@ -448,6 +465,20 @@ Then open <http://127.0.0.1:7860>.
 - All three models are still loaded lazily on first use of their tab (§4) —
   starting the container is fast regardless of which/how many models are
   configured.
+- The container runs as a **non-root user** (`appuser`, UID/GID 1000 by
+  default — the common single-user-Linux-desktop id) instead of root, so
+  files it writes into `outputs/` come out owned by you on the host, not
+  root. If your host user's UID/GID isn't 1000 (`id -u` / `id -g`), rebuild
+  with `docker build --build-arg APP_UID=$(id -u) --build-arg
+  APP_GID=$(id -g) .` so writes match your user exactly.
+- **If `outputs/` already contains root-owned files** (e.g. left over from
+  an older build of this image that ran as root), fix it once with
+  `sudo chown -R "$USER":"$USER" outputs/` — otherwise the non-root
+  container can't write into a directory it doesn't own, and generation
+  fails with a `soundfile.LibsndfileError: ... System error` (a permission
+  error that `libsndfile` doesn't report clearly). This applies whether
+  you're generating from inside Docker or from `uv run` directly on the
+  host afterward.
 
 ### Run with Docker Compose
 
