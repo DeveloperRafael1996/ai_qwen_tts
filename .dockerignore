@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[oc]
+.pytest_cache/
+.ruff_cache/
+
+# Large local model snapshots and generated audio: mounted as volumes
+# instead of being baked into the image.
+models/*
+!models/.gitkeep
+outputs/*
+!outputs/.gitkeep
+
+# Never bake secrets/local overrides into the image.
+.env
+
+.git/
+.github/
+.claude/
+.gitignore

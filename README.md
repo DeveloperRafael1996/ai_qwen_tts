@@ -314,6 +314,8 @@ qwen-tts-playground/
 ├── README.md
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
+├── .dockerignore
 ├── models/                      # local model snapshots (gitignored)
 ├── outputs/                     # generated WAV files (gitignored)
 ├── tests/
@@ -396,4 +398,63 @@ never overwriting existing files:
 
 The UI keeps an in-memory table (timestamp, mode, language, accent, gender,
 voice style, generation time, audio duration, RTF, filename) shared across
-both tabs, for the current browser session only — no database is used.
+all three tabs, for the current browser session only — no database is used.
+
+## 19. Running with Docker
+
+A `Dockerfile` is provided. It uses a plain `python:3.12-slim` base — **no
+CUDA Toolkit inside the image** — because PyTorch's pip wheel already
+bundles the CUDA *runtime* libraries it needs (cuBLAS, cuDNN, NCCL, ...).
+GPU access at `docker run` time comes entirely from the **host's** NVIDIA
+driver + container runtime; only `libcuda.so` (the driver API) is injected
+into the container.
+
+### Build
+
+```bash
+docker build -t qwen-tts-playground .
+```
+
+The image is ~6.7 GB (mostly PyTorch + CUDA runtime libraries) and takes a
+while the first time; `uv sync` layers are cached separately from source
+code changes, so rebuilding after editing `src/` is fast.
+
+### Run
+
+Models are **not** baked into the image (multi-GB, and you likely already
+have them locally per §4) — mount them, along with `outputs/`, as volumes:
+
+```bash
+docker run -d --name qwen-tts-playground \
+  --gpus all \
+  -p 7860:7860 \
+  -v "$(pwd)/models:/app/models:ro" \
+  -v "$(pwd)/outputs:/app/outputs" \
+  qwen-tts-playground
+```
+
+Then open <http://127.0.0.1:7860>.
+
+- `--gpus all` is the standard flag on most Docker + NVIDIA Container
+  Toolkit setups. If it fails with an error mentioning `cdi`/`nvidia`
+  runtime hooks, use `--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all`
+  instead (needed, and verified working, on the machine this was built on).
+- Omit `--gpus all` / `--runtime=nvidia` entirely to run on CPU (much
+  slower, but works — same CPU fallback as running outside Docker).
+- The image sets `PLAYGROUND_HOST=0.0.0.0` by default (required for the
+  server to be reachable from outside the container); override any setting
+  from §5 with `-e VAR=value` or `--env-file .env`.
+- All three models are still loaded lazily on first use of their tab (§4) —
+  starting the container is fast regardless of which/how many models are
+  configured.
+
+### Verified
+
+This exact `Dockerfile` was built and run on the machine this project was
+developed on (GPU: RTX 500 Ada, 4GB VRAM): the container started, found the
+mounted model snapshots, generated real audio on GPU inside the container,
+and wrote the WAV back out through the `outputs/` volume mount. One
+non-obvious fix was required and is already baked into the Dockerfile:
+`build-essential` — without a C compiler, PyTorch/Triton's runtime kernel
+JIT-compilation fails with `Failed to find C compiler` on first generation,
+even though the image builds and the UI serves pages just fine without it.
