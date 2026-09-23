@@ -235,6 +235,10 @@ def build_ui(
         history_rows: list,
     ):
         try:
+            if not service.is_loaded:
+                logger.info("Lazily loading Voice Design model (first use this session)...")
+                service.load()
+
             output_path = build_output_path(settings.output_dir, language, accent, gender)
             result = service.synthesize(
                 text=text,
@@ -322,6 +326,10 @@ def build_ui(
             ("Voice B", gender_b, accent_b, instruct_b),
         ):
             try:
+                if not service.is_loaded:
+                    logger.info("Lazily loading Voice Design model (first use this session)...")
+                    service.load()
+
                 output_path = build_output_path(settings.output_dir, language, accent, gender)
                 result = service.synthesize(
                     text=text,
@@ -726,7 +734,14 @@ def main() -> None:
     settings = get_settings()
 
     service = QwenTTSService(settings, model_source=settings.resolve_model_source())
-    service.load()
+    # NOTE: eager load disabled for now (was: `service.load()` here) — on
+    # small GPUs (e.g. 4GB laptop GPUs) the 1.7B VoiceDesign model can OOM
+    # at startup, crashing the whole app before it even serves a page. It is
+    # now loaded lazily instead, on first use of the Voice Design tab (see
+    # `generate_audio`/`generate_comparison` in `build_ui`), same as the
+    # voice-clone model below. Uncomment the line below to restore eager
+    # loading (e.g. once you have enough VRAM, or want fail-fast at startup).
+    # service.load()
 
     # The voice-clone (Base) model is loaded lazily on first use of that tab,
     # so a GPU that can only fit one model at a time (e.g. a 4-6GB laptop

@@ -95,14 +95,20 @@ and cache it under `~/.cache/huggingface`.
 
 ### Loading behavior
 
-- The **Voice Design** model is loaded exactly once, at process startup —
-  never per-request — as the primary spec requires.
-- The **Voice Clone** model is loaded **lazily**, on the first click of
-  "Generate Cloned Audio" in that tab (then cached for the rest of the
-  session, also never reloaded per-request). This is a deliberate choice:
-  many GPUs (e.g. a 4-6GB laptop GPU) cannot hold both models in VRAM at
-  once, so eagerly loading both at startup would make the whole app fail to
-  launch on modest hardware. See §12 for VRAM numbers observed in practice.
+Both models are currently loaded **lazily**: nothing is loaded at process
+startup, and each model loads (once) on the first "Generate..." click in its
+tab, then stays cached in memory for the rest of the session (never reloaded
+per-request).
+
+This is deliberate: many GPUs (e.g. a 4-6GB laptop GPU) cannot even fit the
+1.7B VoiceDesign model on its own, let alone both models at once, so eager
+loading at startup would crash the whole app before it serves a single
+page. See §12 for VRAM numbers observed in practice.
+
+If your hardware can comfortably fit the VoiceDesign model, you can restore
+eager loading (load-once-at-startup, fail-fast instead of failing on first
+click) by uncommenting the `service.load()` call in `main()`
+(`src/qwen_tts_playground/playground.py`).
 
 ## 5. Configuration
 
@@ -274,7 +280,7 @@ Playground (Gradio UI, 2 tabs)
     │   QwenTTSService[VoiceDesign].synthesize(text, language, instruct)
     │       │
     │       ▼
-    │   Qwen3TTSModel.generate_voice_design(...)  (loaded once at startup)
+    │   Qwen3TTSModel.generate_voice_design(...)  (loaded lazily, on first use)
     │
     └── Voice Clone tab
             │
