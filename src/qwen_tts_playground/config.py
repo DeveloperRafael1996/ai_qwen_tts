@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     playground_host: str = "127.0.0.1"
     playground_port: int = 7860
     output_dir: Path = Path("outputs")
+    # HTTP login for the Gradio UI. Auth is enabled only when BOTH are set.
+    app_username: str = ""
+    app_password: str = ""
+
+    def gradio_auth(self) -> tuple[str, str] | None:
+        """(username, password) for `demo.launch(auth=...)`, or None if disabled."""
+        if self.app_username and self.app_password:
+            return (self.app_username, self.app_password)
+        return None
 
     def resolve_model_source(self) -> str:
         """Local snapshot or HF Hub repo id for the VoiceDesign model."""

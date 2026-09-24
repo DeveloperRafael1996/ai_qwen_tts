@@ -925,7 +925,17 @@ def main() -> None:
         logger.warning("CustomVoice preload failed at startup; it will load lazily on first use.")
 
     demo = build_ui(service, voice_clone_service, custom_voice_service, settings)
-    demo.launch(server_name=settings.playground_host, server_port=settings.playground_port)
+    auth = settings.gradio_auth()
+    if auth is None and settings.playground_host not in ("127.0.0.1", "localhost"):
+        logger.warning(
+            "Listening on %s WITHOUT authentication; set APP_USERNAME and APP_PASSWORD.",
+            settings.playground_host,
+        )
+    demo.launch(
+        server_name=settings.playground_host,
+        server_port=settings.playground_port,
+        auth=auth,
+    )
 
 
 if __name__ == "__main__":

@@ -324,3 +324,15 @@ def test_synthesize_custom_voice_cuda_oom_is_wrapped(service):
     service._model.raise_oom = True
     with pytest.raises(CudaOutOfMemoryError):
         service.synthesize_custom_voice(text="Hello", language="English", speaker="Ryan")
+
+
+def test_gradio_auth_disabled_by_default():
+    assert Settings(app_username="", app_password="").gradio_auth() is None
+    assert Settings(app_username="admin", app_password="").gradio_auth() is None
+
+
+def test_gradio_auth_enabled_when_both_set():
+    assert Settings(app_username="admin", app_password="s3cret").gradio_auth() == (
+        "admin",
+        "s3cret",
+    )

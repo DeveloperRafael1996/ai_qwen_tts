@@ -17,7 +17,13 @@ variable "volume_size_gb" {
 }
 
 variable "allowed_cidr" {
-  description = "CIDR allowed to reach the app (7860) and SSH (22), e.g. \"203.0.113.10/32\". The Gradio app has no auth, so do NOT use 0.0.0.0/0 unless you accept that."
+  description = "CIDR allowed to reach the app (7860). Default is open to the whole internet; the Gradio app has NO authentication, so anyone can use your GPU."
+  type        = string
+  default     = "0.0.0.0/0"
+}
+
+variable "ssh_allowed_cidr" {
+  description = "CIDR allowed to SSH (22), e.g. \"203.0.113.10/32\". Required: never leave SSH open to the world."
   type        = string
 }
 
@@ -44,4 +50,27 @@ variable "github_token" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "app_username" {
+  description = "Username for the Gradio login."
+  type        = string
+  default     = "admin"
+}
+
+variable "app_password" {
+  description = "Password for the Gradio login. NOTE: stored in the instance user_data (visible to anyone with EC2 access to it) and in the Terraform state."
+  type        = string
+  sensitive   = true
+
+  validation {
+    condition     = length(var.app_password) >= 8
+    error_message = "app_password must be at least 8 characters."
+  }
+
+  # docker compose interpolates $ and treats quotes/# specially in env files.
+  validation {
+    condition     = can(regex("^[A-Za-z0-9!@%^&*_+=.,:;?~-]+$", var.app_password))
+    error_message = "app_password may only contain letters, digits and !@%^&*_+=.,:;?~- (no spaces, quotes, $ or #)."
+  }
 }

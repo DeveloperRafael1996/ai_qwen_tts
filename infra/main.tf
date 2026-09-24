@@ -37,7 +37,7 @@ resource "aws_security_group" "app" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_cidr]
+    cidr_blocks = [var.ssh_allowed_cidr]
   }
 
   egress {
@@ -68,9 +68,11 @@ resource "aws_instance" "app" {
   }
 
   user_data = templatefile("${path.module}/user_data.sh.tpl", {
-    repo_url     = var.repo_url
-    repo_branch  = var.repo_branch
-    github_token = var.github_token
+    repo_url         = var.repo_url
+    repo_branch      = var.repo_branch
+    github_token     = var.github_token
+    app_username     = var.app_username
+    app_password_b64 = base64encode(var.app_password)
   })
   user_data_replace_on_change = true
 

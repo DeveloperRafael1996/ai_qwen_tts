@@ -14,6 +14,15 @@ fi
 git clone --branch "${repo_branch}" --depth 1 "$REPO_URL" "$APP_DIR"
 cd "$APP_DIR"
 mkdir -p models outputs
+
+# Gradio login, read by docker-compose via `env_file: .env`. The password is
+# passed base64-encoded so special characters cannot break the script.
+umask 077
+{
+  echo "APP_USERNAME=${app_username}"
+  echo "APP_PASSWORD=$(echo '${app_password_b64}' | base64 -d)"
+} > .env
+umask 022
 # The container runs as uid/gid 1000 (see Dockerfile APP_UID/APP_GID).
 chown -R 1000:1000 models outputs
 
