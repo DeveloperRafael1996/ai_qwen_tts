@@ -27,10 +27,10 @@ variable "ssh_allowed_cidr" {
   type        = string
 }
 
-variable "key_name" {
-  description = "Existing EC2 key pair name for SSH. Null = no SSH key (use it only if you need to log in)."
+variable "ssh_public_key_path" {
+  description = "Path to the PUBLIC ssh key registered in AWS as the instance key pair. Generate it with: ssh-keygen -t ed25519 -f ~/.ssh/qwen-tts. The private key never goes through Terraform."
   type        = string
-  default     = null
+  default     = "~/.ssh/qwen-tts.pub"
 }
 
 variable "repo_url" {

@@ -4,11 +4,11 @@ output "url" {
 }
 
 output "ssh" {
-  description = "SSH command (only if key_name was set)."
-  value       = var.key_name == null ? "no key_name set" : "ssh -i <your-key>.pem ubuntu@${aws_eip.app.public_ip}"
+  description = "SSH command (private key is the one matching ssh_public_key_path)."
+  value       = "ssh -i ${trimsuffix(var.ssh_public_key_path, ".pub")} ubuntu@${aws_eip.app.public_ip}"
 }
 
 output "setup_log" {
   description = "Follow the first-boot progress."
-  value       = "ssh ubuntu@${aws_eip.app.public_ip} 'tail -f /var/log/qwen-setup.log'"
+  value       = "ssh -i ${trimsuffix(var.ssh_public_key_path, ".pub")} ubuntu@${aws_eip.app.public_ip} 'tail -f /var/log/qwen-setup.log'"
 }

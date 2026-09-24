@@ -3,6 +3,6 @@ ssh_allowed_cidr = "203.0.113.10/32" # your public IP: curl ifconfig.me
 # allowed_cidr   = "0.0.0.0/0"       # app (7860): open to everyone by default
 repo_url     = "https://github.com/DeveloperRafael1996/ai_qwen_tts.git"
 # github_token = "github_pat_..."  # only if you point repo_url at a private repo
-# key_name     = "my-keypair"      # only if you want SSH access
 app_password     = "change-me-please"  # Gradio login (min 8 chars)
 # app_username   = "admin"
+# ssh_public_key_path = "~/.ssh/qwen-tts.pub"  # ssh-keygen -t ed25519 -f ~/.ssh/qwen-tts
