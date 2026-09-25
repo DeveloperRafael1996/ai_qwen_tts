@@ -595,3 +595,29 @@ and NVIDIA Container Toolkit provide `libcuda`. Verify inside the container:
 ```bash
 docker exec qwen-tts-playground python -c "import torch; print(torch.cuda.is_available())"
 ```
+
+## 21. Cartesia Sonic-3.6 tab (hosted API)
+
+Sonic-3.6 is **API-only** (no downloadable weights); local/on-prem/on-device
+exists only under an enterprise contract. Put `CARTESIA_API_KEY` in `.env`
+(key from <https://play.cartesia.ai/keys>). The tab has a **Voice preset**
+dropdown, so a voice id is not required; choose *Custom* to paste any id from
+the Cartesia voice library. `CARTESIA_VOICE_ID` only overrides the initial id.
+
+Recommended voices (ids from the voice library; all generated audio
+successfully in our tests, but judge naturalness and accent by ear):
+
+| Language | Female | Male |
+| --- | --- | --- |
+| Spanish | Ximena (Latina), Fernanda (Mexican) | Mateo (Mexican), Marcos (Spain) |
+| Portuguese | Helena | Felipe |
+| English | Skylar (American), Gemma (British) | Daniel, Archie (British), Arlo (Australian) |
+
+Notes: gender is stated in the library description for the Spanish and
+English voices; for Helena and Felipe it is inferred from the name (verify by
+ear). **Accent (locale)** sends the API's `locale`: accepted here are
+`es-MX`, `es-ES`, `es-US`, `pt-BR`, `pt-PT`, `en-US`, `en-GB`, `en-AU`,
+`en-IN`, `en-CA`, `en-ZA` (`es-AR`, `es-CO`, `es-PE` are rejected by the
+API). Use a voice whose language matches the selected language.
+
+Full voice catalog (all three languages) and pricing: [doc/cartesia-sonic.md](doc/cartesia-sonic.md).

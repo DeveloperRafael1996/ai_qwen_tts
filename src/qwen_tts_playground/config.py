@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # HTTP login for the Gradio UI. Auth is enabled only when BOTH are set.
     app_username: str = ""
     app_password: str = ""
+    # Cartesia Sonic-3.6 (hosted API only). The tab needs both to generate audio.
+    cartesia_api_key: str = ""
+    cartesia_voice_id: str = ""
 
     def gradio_auth(self) -> tuple[str, str] | None:
         """(username, password) for `demo.launch(auth=...)`, or None if disabled."""

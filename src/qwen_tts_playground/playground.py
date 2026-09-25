@@ -18,6 +18,12 @@ from datetime import datetime
 
 import gradio as gr
 
+from qwen_tts_playground.cartesia_client import (
+    ACCENT_LOCALES,
+    CARTESIA_VOICES,
+    DEFAULT_ACCENT,
+    CartesiaClient,
+)
 from qwen_tts_playground.config import Settings, get_settings
 from qwen_tts_playground.models import AgeGroup, Emotion, Gender, Language, Personality, Speed
 from qwen_tts_playground.profiles import (
@@ -234,6 +240,27 @@ def _history_row(
         round(result.real_time_factor, 3),
         result.output_path.name,
     ]
+
+
+CUSTOM_VOICE_LABEL = "Custom (use the id below)"
+
+
+def _cartesia_voice_choices(language: str) -> list:
+    return [*CARTESIA_VOICES.get(language.lower(), []), (CUSTOM_VOICE_LABEL, "")]
+
+
+def _cartesia_accents(language: str) -> list[str]:
+    return [DEFAULT_ACCENT, *ACCENT_LOCALES.get(language.lower(), [])]
+
+
+CARTESIA_INFO_MD = (
+    "**Cartesia Sonic-3.6** is a *hosted API only* model (no downloadable weights): text is "
+    "sent to Cartesia's servers, so it needs `CARTESIA_API_KEY` and network access, and it is "
+    "billed per usage. Local / on-prem / on-device deployment exists only under enterprise "
+    "contract (Sonic On-Device is in private beta). Audio streams back, so **TTFA here is "
+    "measured for real** (first audio chunk). GPU/VRAM does not apply: it runs on Cartesia's "
+    "infrastructure."
+)
 
 
 def build_ui(
@@ -499,6 +526,47 @@ def build_ui(
             new_rows,
         )
 
+    cartesia_client = CartesiaClient(settings.cartesia_api_key)
+
+    def generate_cartesia(
+        text: str, language: str, accent: str, voice_id: str, speed: float, history_rows: list
+    ):
+        try:
+            output_path = build_output_path(settings.output_dir, language, "cartesia", "voice")
+            result = cartesia_client.synthesize(
+                text,
+                language,
+                voice_id,
+                output_path,
+                speed=float(speed),
+                locale=None if accent == DEFAULT_ACCENT else accent,
+            )
+        except TTSServiceError as exc:
+            logger.warning("Cartesia synthesis rejected: %s", exc)
+            return None, "", f"Error: {exc}", history_rows, history_rows
+        except Exception:
+            logger.exception("Unexpected error during Cartesia synthesis")
+            return (
+                None,
+                "",
+                "Error: unexpected error. Check server logs.",
+                history_rows,
+                history_rows,
+            )
+
+        perf_md = (
+            f"**Model:** {cartesia_client.model_id} (API)\n\n"
+            f"**Accent:** {accent}  \n"
+            f"**TTFA:** {result.ttfa_ms:.0f} ms  \n"
+            f"**Generation:** {result.generation_time_seconds:.2f} s  \n"
+            f"**Audio:** {result.audio_duration_seconds:.2f} s  \n"
+            f"**RTF:** {result.real_time_factor:.3f}  \n"
+            f"**Sample rate:** {result.sample_rate} Hz"
+        )
+        row = _history_row(result, "Cartesia", language, accent, "-", voice_id[:12])
+        new_rows = [*history_rows, row]
+        return str(result.output_path), perf_md, "Audio generated successfully.", new_rows, new_rows
+
     with gr.Blocks(title="Qwen3-TTS VoiceDesign Playground") as demo:
         gr.Markdown("# Qwen3-TTS VoiceDesign Playground")
         gr.Markdown(
@@ -724,6 +792,41 @@ def build_ui(
                     cv_perf_info = gr.Markdown("")
                     cv_gpu_info = gr.Markdown(_format_gpu_markdown(custom_voice_service))
 
+        with gr.Tab("Cartesia Sonic-3.6"):
+            gr.Markdown(CARTESIA_INFO_MD)
+            if not settings.cartesia_api_key:
+                gr.Markdown("**`CARTESIA_API_KEY` is not set** - generation is disabled.")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    cs_language = gr.Dropdown(
+                        LANGUAGE_CHOICES, value=DEFAULT_LANGUAGE, label="Language"
+                    )
+                    cs_accent = gr.Dropdown(
+                        _cartesia_accents(DEFAULT_LANGUAGE),
+                        value=DEFAULT_ACCENT,
+                        label="Accent (locale)",
+                    )
+                    cs_voice_preset = gr.Dropdown(
+                        _cartesia_voice_choices(DEFAULT_LANGUAGE),
+                        value=_cartesia_voice_choices(DEFAULT_LANGUAGE)[0][1],
+                        label="Voice preset",
+                    )
+                    cs_voice_id = gr.Textbox(
+                        value=settings.cartesia_voice_id
+                        or _cartesia_voice_choices(DEFAULT_LANGUAGE)[0][1],
+                        label="Cartesia voice id",
+                        placeholder="Copy an id from the Cartesia voice library",
+                    )
+                    cs_text = gr.Textbox(
+                        value=SAMPLE_TEXTS[DEFAULT_LANGUAGE], label="Text to synthesize", lines=4
+                    )
+                    cs_speed = gr.Slider(0.6, 1.5, value=1.0, step=0.05, label="Speed")
+                    cs_btn = gr.Button("Generate Audio", variant="primary")
+                with gr.Column(scale=1):
+                    cs_audio = gr.Audio(label="Generated Audio", autoplay=False)
+                    cs_status = gr.Markdown("")
+                    cs_perf = gr.Markdown("")
+
         gr.Markdown("## Session History")
         history_table = gr.Dataframe(headers=HISTORY_HEADERS, value=[], wrap=True)
 
@@ -887,6 +990,32 @@ def build_ui(
                 history_state,
                 history_table,
             ],
+        )
+
+        cs_language.change(
+            fn=lambda lang: (
+                gr.update(choices=_cartesia_accents(lang), value=DEFAULT_ACCENT),
+                gr.update(
+                    choices=_cartesia_voice_choices(lang),
+                    value=_cartesia_voice_choices(lang)[0][1],
+                ),
+                _cartesia_voice_choices(lang)[0][1],
+                SAMPLE_TEXTS[lang],
+            ),
+            inputs=[cs_language],
+            outputs=[cs_accent, cs_voice_preset, cs_voice_id, cs_text],
+        )
+
+        cs_voice_preset.input(
+            fn=lambda voice_id: voice_id or gr.update(),
+            inputs=[cs_voice_preset],
+            outputs=[cs_voice_id],
+        )
+
+        cs_btn.click(
+            fn=generate_cartesia,
+            inputs=[cs_text, cs_language, cs_accent, cs_voice_id, cs_speed, history_state],
+            outputs=[cs_audio, cs_perf, cs_status, history_state, history_table],
         )
 
     return demo
