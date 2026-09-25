@@ -65,6 +65,7 @@ class TTSResult(BaseModel):
     generation_time_seconds: float
     audio_duration_seconds: float
     real_time_factor: float
+    ttfa_ms: float | None = None
 
 
 class HistoryEntry(BaseModel):

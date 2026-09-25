@@ -511,3 +511,87 @@ non-obvious fix was required and is already baked into the Dockerfile:
 `build-essential` — without a C compiler, PyTorch/Triton's runtime kernel
 JIT-compilation fails with `Failed to find C compiler` on first generation,
 even though the image builds and the UI serves pages just fine without it.
+
+## 20. AWS g5.xlarge (A10G) — performance & FlashAttention
+
+### Runtime logging and per-request metrics
+
+On model load the app logs a `Qwen3-TTS Runtime` block (GPU, VRAM, dtype,
+attention, device, model). If FlashAttention is not used it also logs the
+reason. Every generation logs a `TTS PERFORMANCE` block with `model`, `gpu`,
+`attention`, `text_characters` (never the text itself), `generation_time_ms`,
+`audio_duration_ms` and `rtf`.
+
+**TTFA is reported as `N/A`.** The installed `qwen-tts` API returns whole
+clips (`generate_*` has no streaming/chunk output), so there is no "first
+audio chunk" to time; total generation time is never passed off as TTFA. The
+code path (`metrics.ttfa_ms`) is ready if a streaming API appears.
+
+`QWEN_TTS_ATTENTION` (`.env`) selects the attention: `auto` (default,
+FlashAttention 2 if it actually runs, else PyTorch SDPA), `flash` (same, but
+warns when unavailable) or `default` (never FlashAttention). A missing or
+broken `flash-attn` never stops the service.
+
+### Check the environment first (on the EC2 host)
+
+```bash
+nvidia-smi                      # driver version + max CUDA it supports
+uv run python -c "from qwen_tts_playground.runtime import diagnose_environment as d; print(d())"
+```
+
+`uv.lock` currently resolves PyTorch `+cu130`. That needs an NVIDIA driver
+that supports CUDA 13; if the Deep Learning AMI's driver is older, pin a
+CUDA index that matches it (see §2) instead of upgrading the driver.
+
+### FlashAttention (optional)
+
+Only try it if the diagnosis above says `FlashAttention installed: false`
+and a prebuilt `flash-attn` wheel exists for your exact torch/CUDA/Python
+combination (see the flash-attn GitHub releases). The A10G (compute
+capability 8.6) is supported by FlashAttention 2. Install it without
+touching torch:
+
+```bash
+uv pip install --no-deps "<URL of the matching flash-attn wheel>"
+```
+
+If no wheel matches, skip it: the default attention is used and nothing
+breaks. Do not downgrade torch/CUDA/drivers just to get it.
+
+### Verify FlashAttention is really used
+
+1. The startup log shows `Attention: FlashAttention 2` (the value is read
+   back from the loaded model's config, not just what was requested).
+2. `FlashAttention usable: true` in the diagnosis above — this runs a real
+   `flash_attn_func` kernel, so an installed-but-broken wheel reports `false`.
+3. `uv run python scripts/benchmark_tts.py --attention both` compares both
+   runtimes on the same machine.
+
+### Benchmark
+
+The Base model clones a voice, so it needs a reference clip:
+
+```bash
+uv run python scripts/benchmark_tts.py \
+  --ref-audio ref.wav --ref-text "Text spoken in ref.wav" \
+  --iterations 20 --warmup 3 --attention both
+```
+
+Other options: `--model voicedesign|customvoice`, `--attention
+auto|flash|default|both`, `--x-vector-only`, `--language`. The model loads
+once per attention mode; warm-up requests are excluded; each of the
+SHORT/MEDIUM/LONG texts is run `--iterations` times. The report prints
+p50/p95/p99 of generation time and RTF, TTFA (N/A, see above) and VRAM
+(initial, after load, peak allocated, peak reserved); `--attention both`
+adds a DEFAULT vs FLASH ATTENTION table. FlashAttention is not assumed to be
+faster — run it and compare.
+
+### Docker on EC2
+
+`docker run --gpus all ...` (or the provided compose file, `runtime:
+nvidia`) is enough: the image contains no NVIDIA driver; the host driver
+and NVIDIA Container Toolkit provide `libcuda`. Verify inside the container:
+
+```bash
+docker exec qwen-tts-playground python -c "import torch; print(torch.cuda.is_available())"
+```

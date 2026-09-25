@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -50,6 +51,9 @@ class Settings(BaseSettings):
     playground_host: str = "127.0.0.1"
     playground_port: int = 7860
     output_dir: Path = Path("outputs")
+    # auto: FlashAttention 2 when usable, else PyTorch default; flash: same but
+    # warns when unavailable; default: never use FlashAttention.
+    qwen_tts_attention: Literal["auto", "flash", "default"] = "auto"
     # HTTP login for the Gradio UI. Auth is enabled only when BOTH are set.
     app_username: str = ""
     app_password: str = ""

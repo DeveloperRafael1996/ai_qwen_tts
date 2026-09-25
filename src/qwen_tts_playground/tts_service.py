@@ -16,14 +16,26 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from importlib.util import find_spec
 from pathlib import Path
 
 import soundfile as sf
 import torch
 
 from qwen_tts_playground.config import Settings
+from qwen_tts_playground.metrics import (
+    RequestMetrics,
+    audio_duration_seconds,
+    real_time_factor,
+)
 from qwen_tts_playground.models import TTSResult
+from qwen_tts_playground.runtime import (
+    FLASH_IMPL,
+    AttentionChoice,
+    describe_runtime,
+    gpu_name,
+    resolve_attention,
+    select_dtype,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,28 +114,45 @@ def build_output_path(output_dir: Path, language: str, accent: str, gender: str)
     return candidate
 
 
-def _flash_attention_available() -> bool:
-    return find_spec("flash_attn") is not None
-
-
 def _write_result(
-    wavs: list, sample_rate: int, generation_time: float, output_path: Path
+    wavs: list,
+    sample_rate: int,
+    generation_time: float,
+    output_path: Path,
+    text: str,
+    model_name: str,
+    attention: str,
 ) -> TTSResult:
     if not wavs:
         raise GenerationError("Model returned no audio.")
 
     wav = wavs[0]
-    audio_duration = len(wav) / float(sample_rate)
-    real_time_factor = generation_time / audio_duration if audio_duration > 0 else float("inf")
+    audio_duration = audio_duration_seconds(len(wav), sample_rate)
+    rtf = real_time_factor(generation_time, audio_duration)
 
     sf.write(str(output_path), wav, sample_rate)
+
+    # The model API returns whole clips (no streaming), so TTFA is unavailable.
+    logger.info(
+        "%s",
+        RequestMetrics(
+            model=model_name,
+            gpu=gpu_name(),
+            attention=attention,
+            text_characters=len(text),
+            generation_time_seconds=generation_time,
+            audio_duration_seconds=audio_duration,
+            ttfa_ms=None,
+        ).format_log(),
+    )
 
     return TTSResult(
         output_path=output_path,
         sample_rate=sample_rate,
         generation_time_seconds=generation_time,
         audio_duration_seconds=audio_duration,
-        real_time_factor=real_time_factor,
+        real_time_factor=rtf,
+        ttfa_ms=None,
     )
 
 
@@ -157,6 +186,8 @@ class QwenTTSService:
         self._device: str = "cpu"
         self._dtype: torch.dtype = torch.float32
         self._model_source: str = ""
+        self._attention: AttentionChoice | None = None
+        self._attention_in_use: str = "not loaded"
 
     @property
     def is_loaded(self) -> bool:
@@ -165,6 +196,28 @@ class QwenTTSService:
     @property
     def device(self) -> str:
         return self._device
+
+    @property
+    def model_name(self) -> str:
+        return Path(self._model_source).name or self._model_source
+
+    @property
+    def attention_in_use(self) -> str:
+        """Attention implementation the loaded model actually reports."""
+        return self._attention_in_use
+
+    def runtime_info(self) -> dict[str, object]:
+        """Runtime facts for a health/debug view; contains nothing sensitive."""
+        flash = self._attention.flash if self._attention else None
+        return {
+            "model": self.model_name,
+            "loaded": self.is_loaded,
+            "device": self._device,
+            "gpu": gpu_name(),
+            "dtype": str(self._dtype).removeprefix("torch."),
+            "attention": self._attention_in_use,
+            "flash_attention_available": bool(flash and flash.usable),
+        }
 
     def load(self) -> None:
         """Load the model once. Safe to call multiple times (no-op after first)."""
@@ -187,15 +240,17 @@ class QwenTTSService:
 
         use_cuda = torch.cuda.is_available()
         self._device = "cuda:0" if use_cuda else "cpu"
-        self._dtype = torch.bfloat16 if use_cuda else torch.float32
+        self._dtype = select_dtype(use_cuda)
 
         load_kwargs: dict = {
             "device_map": self._device,
             "dtype": self._dtype,
         }
 
-        use_flash_attn = use_cuda and _flash_attention_available()
-        attn_implementation = "flash_attention_2" if use_flash_attn else None
+        self._attention = resolve_attention(
+            self._settings.qwen_tts_attention, use_cuda, self._dtype
+        )
+        attn_implementation = self._attention.implementation
         if attn_implementation:
             load_kwargs["attn_implementation"] = attn_implementation
 
@@ -211,6 +266,7 @@ class QwenTTSService:
                         exc,
                     )
                     load_kwargs.pop("attn_implementation", None)
+                    self._attention = AttentionChoice(None, self._attention.flash, str(exc))
                     self._model = Qwen3TTSModel.from_pretrained(model_source, **load_kwargs)
                 else:
                     raise
@@ -226,13 +282,16 @@ class QwenTTSService:
         except OSError as exc:
             raise ModelNotFoundError(f"Could not load model from '{model_source}': {exc}") from exc
 
-        logger.info(
-            "Model loaded | device=%s | dtype=%s | model_path=%s | GPU=%s",
-            self._device,
-            self._dtype,
-            model_source,
-            _gpu_summary(),
+        config = getattr(getattr(self._model, "model", None), "config", None)
+        reported = getattr(config, "_attn_implementation", None)
+        self._attention_in_use = reported or (
+            FLASH_IMPL if self._attention.implementation else "sdpa"
         )
+        logger.info(
+            "\n%s",
+            describe_runtime(self.model_name, self._device, self._dtype, self._attention),
+        )
+        logger.info("Model loaded | model_path=%s | GPU=%s", model_source, _gpu_summary())
 
     def gpu_metrics(self) -> dict[str, str]:
         """Return current GPU/VRAM metrics; never raises if CUDA is unavailable."""
@@ -309,7 +368,15 @@ class QwenTTSService:
 
             generation_time = time.perf_counter() - start
 
-        return _write_result(wavs, sample_rate, generation_time, output_path)
+        return _write_result(
+            wavs,
+            sample_rate,
+            generation_time,
+            output_path,
+            text,
+            self.model_name,
+            self._attention_in_use,
+        )
 
     def synthesize_custom_voice(
         self,
@@ -383,7 +450,15 @@ class QwenTTSService:
 
             generation_time = time.perf_counter() - start
 
-        return _write_result(wavs, sample_rate, generation_time, output_path)
+        return _write_result(
+            wavs,
+            sample_rate,
+            generation_time,
+            output_path,
+            text,
+            self.model_name,
+            self._attention_in_use,
+        )
 
     def synthesize_voice_clone(
         self,
@@ -459,4 +534,12 @@ class QwenTTSService:
 
             generation_time = time.perf_counter() - start
 
-        return _write_result(wavs, sample_rate, generation_time, output_path)
+        return _write_result(
+            wavs,
+            sample_rate,
+            generation_time,
+            output_path,
+            text,
+            self.model_name,
+            self._attention_in_use,
+        )
