@@ -576,7 +576,7 @@ def build_ui(
         history_state = gr.State([])
         preset_guard_state = gr.State(0)
 
-        with gr.Tab("Voice Design"):
+        with gr.Tab("Voice Design", visible=False):
             with gr.Row():
                 with gr.Column(scale=1):
                     language = gr.Dropdown(
@@ -686,7 +686,7 @@ def build_ui(
 
             compare_btn = gr.Button("Generate Comparison")
 
-        with gr.Tab("Voice Clone"):
+        with gr.Tab("Voice Clone", visible=False):
             gr.Markdown(
                 "Clone a voice from a short reference audio clip (3+ seconds recommended) "
                 "using the smaller **Qwen3-TTS-12Hz-0.6B-Base** model. This model is loaded "
