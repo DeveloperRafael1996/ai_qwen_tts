@@ -468,10 +468,6 @@ def build_ui(
         language: str,
         speaker: str,
         instruct: str,
-        seed: float | None,
-        temperature: float | None,
-        top_p: float | None,
-        top_k: float | None,
         history_rows: list,
     ):
         try:
@@ -486,10 +482,6 @@ def build_ui(
                 speaker=speaker,
                 instruct=instruct or None,
                 output_path=output_path,
-                temperature=float(temperature) if temperature else None,
-                top_p=float(top_p) if top_p else None,
-                top_k=int(top_k) if top_k else None,
-                seed=int(seed) if seed else None,
             )
         except TTSServiceError as exc:
             logger.warning("Custom-voice synthesis rejected: %s", exc)
@@ -776,14 +768,6 @@ def build_ui(
                         "package version enables it — see the README for details._"
                     )
 
-                    with gr.Accordion("Advanced Settings", open=False):
-                        cv_seed = gr.Number(label="Seed (optional)", value=None, precision=0)
-                        cv_temperature = gr.Slider(
-                            0.1, 1.5, value=0.9, step=0.05, label="Temperature"
-                        )
-                        cv_top_p = gr.Slider(0.1, 1.0, value=1.0, step=0.05, label="Top P")
-                        cv_top_k = gr.Slider(0, 100, value=50, step=1, label="Top K")
-
                     generate_cv_btn = gr.Button("Generate Audio", variant="primary")
 
                 with gr.Column(scale=1):
@@ -976,10 +960,6 @@ def build_ui(
                 cv_language,
                 cv_speaker,
                 cv_instruct,
-                cv_seed,
-                cv_temperature,
-                cv_top_p,
-                cv_top_k,
                 history_state,
             ],
             outputs=[
